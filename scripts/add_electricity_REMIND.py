@@ -1280,9 +1280,9 @@ def attach_RCL_generators(
     rcl_generators["p_nom_max"] = np.inf
 
     # Finally add RCL generators to network
-    n.madd("Generator", rcl_generators.index, **rcl_generators)
+    n.add("Generator", rcl_generators.index, **rcl_generators)
 
-    # Transfer time-dependent dispatch limits which are not transfered thorugh n.madd(...)
+    # Transfer time-dependent dispatch limits which are not transfered thorugh n.add(...)
     n.pnl("Generator")["p_min_pu"] = pd.merge(
         n.pnl("Generator")["p_min_pu"],
         n.pnl("Generator")["p_min_pu"][
@@ -1380,7 +1380,7 @@ def attach_RCL_links(
     rcl_links["p_nom_max"] = np.inf
 
     # Finally add RCL links to network
-    n.madd("Link", rcl_links.index, **rcl_links)
+    n.add("Link", rcl_links.index, **rcl_links)
 
 
 def attach_RCL_stores(
@@ -1462,7 +1462,7 @@ def attach_RCL_stores(
     rcl_stores["e_nom_max"] = np.inf
 
     # Finally add RCL stores to network
-    n.madd("Store", rcl_stores.index, **rcl_stores)
+    n.add("Store", rcl_stores.index, **rcl_stores)
 
 
 def attach_hydrogen_demand_central_bus(
@@ -1530,6 +1530,7 @@ def attach_hydrogen_demand_central_bus(
         n.add(
             "Load",
             name=f"{row['region']} H2 demand REMIND",
+            carrier = "H2",
             bus=f"{row['region']} H2 demand",
             p_set=row["value"] / 8760,
         )
@@ -1640,12 +1641,14 @@ def attach_hydrogen_demand_per_node(
             n.add(
                 "Load",
                 name=f"{bus} demand REMIND",
+                carrier = "H2",
                 bus=bus,
                 p_set=h2_demand_region * weights[bus] / 8760,
             )
 
 
 # Function modified from prepare_sector_network.py
+# TODO: Adjust for multiple regions
 def add_EVs_REMIND(n, options_ev):
 
     # Read in electricity demand for EVs
@@ -1706,7 +1709,7 @@ def add_EVs_REMIND(n, options_ev):
 
     n.add("Carrier", "EV battery")
 
-    n.madd(
+    n.add(
         "Bus",
         spatial_nodes,
         suffix=" EV battery",
@@ -1719,7 +1722,7 @@ def add_EVs_REMIND(n, options_ev):
         load_p_set + cycling_shift(load_p_set, 1) + cycling_shift(load_p_set, 2)
     ) / 3
 
-    n.madd(
+    n.add(
         "Load",
         spatial_nodes,
         suffix=" land transport EV",
@@ -1728,7 +1731,7 @@ def add_EVs_REMIND(n, options_ev):
         p_set=p_shifted.loc[n.snapshots, spatial_nodes],
     )
 
-    n.madd(
+    n.add(
         "Link",
         spatial_nodes,
         suffix=" BEV charger",
@@ -1743,7 +1746,7 @@ def add_EVs_REMIND(n, options_ev):
 
     if options_ev["dsm"]:
 
-        n.madd(
+        n.add(
             "Store",
             spatial_nodes,
             suffix=" EV battery",
@@ -1755,9 +1758,6 @@ def add_EVs_REMIND(n, options_ev):
             e_min_pu=store_dsm_profile.loc[n.snapshots, spatial_nodes],
         )
 
-    # Subtract EV load from total load
-    subtract_from_load(n, load_p_set)
-
 
 def cycling_shift(df, steps=1):
     """
@@ -1768,32 +1768,11 @@ def cycling_shift(df, steps=1):
     df.values[:] = df.reindex(index=new_index).values
     return df
 
-
-def subtract_from_load(n, load_p_set):
-    """
-    Subtracts the EV load from the total load in the network.
-    """
-    n.loads_t["p_set"][spatial_nodes] -= load_p_set.loc[n.snapshots].values
-
-
+# TODO: Adjust for multiple regions
 def add_heat_REMIND(
     n: pypsa.Network,
     cop_profiles_file: str,
-    #    direct_heat_source_utilisation_profile_file: str,
     hourly_heat_demand_total_file: str,
-    #    ptes_e_max_pu_file: str,
-    #    district_heat_share_file: str,
-    #    solar_thermal_total_file: str,
-    #    retro_cost_file: str,
-    #    floor_area_file: str,
-    #    heat_source_profile_files: dict[str, str],
-    #    params: dict,
-    pop_weighted_energy_totals: pd.DataFrame,
-    heating_efficiencies: pd.DataFrame,
-    #    pop_layout: pd.DataFrame,
-    #    spatial: object,
-    #    options: dict,
-    #    investment_year: int,
     fp_remind_data: str,
     options_heat: dict,
 ):
@@ -1829,7 +1808,7 @@ def add_heat_REMIND(
             "p32_load_heatpump",  # TODO: p32_load_heatpump
             rename_columns={"ttot": "year", "all_regi": "region"},
         )
-        .query("year == @year")
+        .query("year == @snakemake.wildcards.year")
         .drop(columns="year")
     )
     elec_heat_pump_REMIND["value"] *= 1e6 * 8760  # convert from TWa to MWh
@@ -1844,7 +1823,7 @@ def add_heat_REMIND(
             "p32_load_resistive",  # TODO: p32_load_resistive
             rename_columns={"ttot": "year", "all_regi": "region"},
         )
-        .query("year == @year")
+        .query("year == @snakemake.wildcards.year")
         .drop(columns="year")
     )
     elec_resistive_REMIND["value"] *= 1e6 * 8760  # convert from TWa to MWh
@@ -1858,7 +1837,7 @@ def add_heat_REMIND(
     
     # Add buses
     spatial_nodes = n.buses.query("carrier == 'AC'").index
-    n.madd(
+    n.add(
         "Bus",
         spatial_nodes,
         suffix=" heat pump electricity",
@@ -1866,7 +1845,7 @@ def add_heat_REMIND(
         carrier="heat pump electricity",
         unit="MWh_el",
     )
-    n.madd(
+    n.add(
         "Bus",
         spatial_nodes,
         suffix=" resistive heating electricity",
@@ -1876,15 +1855,15 @@ def add_heat_REMIND(
     )
     
     # Add loads
-    n.madd(
+    n.add(
         "Load",
         spatial_nodes,
         suffix=" heat pump electricity",
         bus=spatial_nodes + " heat pump electricity",
         carrier="heat pump electricity",
-        p_set=elec_hp_profile.loc[n.snapshots],
+        p_set=elec_hp_profile_REMIND.loc[n.snapshots],
     )
-    n.madd(
+    n.add(
         "Load",
         spatial_nodes,
         suffix=" resistive heating electricity",
@@ -1894,11 +1873,12 @@ def add_heat_REMIND(
     )
     
     # Add links
-    n.madd(
+    n.add(
         "Link",
         spatial_nodes,
+        carrier = "heat pump",
         # This link is not an actual heat pump, but only a link from the electricity bus
-        suffix=" heat pump charger",
+        suffix=" heat pump",
         bus0=spatial_nodes,
         bus1=spatial_nodes + " heat pump electricity",
         # No need to make extendable, just allow max throughput
@@ -1908,11 +1888,12 @@ def add_heat_REMIND(
         p_min_pu=0,  # Unidirectional link
         p_max_pu=1,        
     )
-    n.madd(
+    n.add(
         "Link",
         spatial_nodes,
+        carrier = "resistive heating",
         # This link is not an actual resistive heating, but only a link from the electricity bus
-        suffix=" resistive heating charger",
+        suffix=" resistive heating",
         bus0=spatial_nodes,
         bus1=spatial_nodes + " resistive heating electricity",
         # No need to make extendable, just allow max throughput
@@ -2137,7 +2118,6 @@ if __name__ == "__main__":
             hourly_heat_demand_total_file=snakemake.input.hourly_heat_demand_total,
             options_heat=sc_settings["heating"],
             fp_remind_data=snakemake.input["remind_data"],
-            year=snakemake.wildcards["year"]
         )
 
     sanitize_carriers(n, snakemake.config)

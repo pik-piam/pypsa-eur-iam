@@ -321,7 +321,10 @@ rule import_REMIND_costs:
 
 
 # Read in electricity demand data from REMIND and create a csv that contains the scaling factor
+# TODO: Remove year wildcard
 rule import_REMIND_load:
+    params:
+        sector_coupling=config_provider("remind_coupling","sector_coupling"),
     input:
         load_timeseries=RESOURCES + "electricity_demand.csv",
         region_mapping="config/regionmapping_21_EU11.csv",
@@ -340,6 +343,7 @@ rule import_REMIND_load:
 
 # Build csv with min capacities for PyPSA-EUR based on installed capacities from REMIND.
 # Used as RCL (Region-Carrier-Limits) contraints in PyPSA-EUR.
+# TODO: Remove year wildcard
 rule import_REMIND_RCL_p_nom_limits:
     input:
         remind_data=SCENARIO_RESOURCES + "i{iteration}/REMIND2PyPSAEUR.gdx",

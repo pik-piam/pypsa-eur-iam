@@ -32,7 +32,7 @@ def add_columns_for_processing(n, region_mapping, map_pypsaeur_to_general):
     """
     # Remove columns from network components if they already exist
     # These come from the RCL constraints
-    # TODO: Harmonise columns names in RCL constraints
+    # TODO: Harmonise column names in RCL constraints
     for comp in ["generators", "links", "stores"]:
         if "region_REMIND" in getattr(n, comp).columns:
             getattr(n, comp).drop(columns=["region_REMIND"], inplace=True)
@@ -216,6 +216,11 @@ def process_data(df, cols, map_to_remind):
         df = df.query("general_carrier != 'BEV charger'")
         df = df.query("general_carrier != 'EV battery'")
 
+    # Remove rows related to heating if available
+    if "general_carrier" in df.columns:
+        df = df.query("general_carrier != 'heat pump'")
+        df = df.query("general_carrier != 'resistive heating'")
+
     # Function to map and explode carrier columns
     def map_and_explode(df, column):
         if column in df.columns:
@@ -355,51 +360,85 @@ def calculate_capacity_factors(n, comps, grouper, map_to_remind):
     return process_data(capacity_factors, cols=grouper, map_to_remind=map_to_remind)
 
 
-def calculate_load_prices(n, grouper):
+# TODO: Make compatible with multiple regions
+def calculate_electricity_prices(n, z_cutoff, hourly=False):
     """
-    Calculate load prices for the network.
+    Calculate sectoral electricity prices for the network.
+    The issue is that we cannot always just use the marginal price at each bus
+    as these may be also include the effect of additional investments or
+    efficiencies of links (e.g. electrolysers) or the effect of stores (e.g. for EVs with DSM).
+    This function therefore calculates the sectoral electricity price paid by
+    each sector and the weighted average price.
 
     Parameters
     ----------
     n : pypsa.Network
-        Network to calculate load prices for.
-    grouper : list
-        List of columns to group the load prices by.
-    """
-    # Calculate load prices
-    load_prices = n.statistics.revenue(comps=["Load"], groupby=grouper) / (
-        -1 * n.statistics.withdrawal(comps=["Load"], groupby=grouper)
-    )
-    load_prices = (
-        load_prices.to_frame("value").reset_index().drop(columns=["component"])
-    )
-
-    return load_prices
-
-
-def calculate_load_prices_with_cutoff(n, grouper, z_cutoff):
-    """
-    Calculate load prices for the network with a z-score cutoff.
-
-    Parameters
-    ----------
-    n : pypsa.Network
-        Network to calculate load prices for.
-    grouper : list
-        List of columns to group the load prices by.
-    z_cutoff: float
+        Network to calculate electricity prices for.
+    z_cutoff: float or bool
         Z-score above which to cut off scarcity prices.
+    hourly: bool
+        Whether to return total hourly prices instead of sectoral average prices.
     """
     # Cutoff scarcity prices if configured
-    if z_cutoff:
-        n_calc = cutoff_scarcity_prices(n, z_cutoff)
-    else:
-        n_calc = n
+    n_calc = cutoff_scarcity_prices(n, z_cutoff) if z_cutoff else n
 
-    # Calculate load prices
-    load_prices = calculate_load_prices(n_calc, grouper)
+    # Extract AC loads and corresponding locational marginal prices (LMPs)
+    load_ac = n_calc.loads_t.p.loc[:, n_calc.loads.general_carrier == "AC"]
+    lmp = n_calc.buses_t.marginal_price.loc[:, load_ac.columns]
 
-    return load_prices
+    def weighted_avg_price(load_df):
+        """Helper to compute the weighted average electricity price."""
+        if load_df.empty:
+            return 0.0
+        return (load_df * lmp).sum().sum() / load_df.sum().sum()
+
+    # Define relevant load types and their corresponding carrier names
+    sector_loads = {
+        "AC": load_ac,
+        "electrolysis": n_calc.links_t.p0.loc[
+            :, n_calc.links.carrier == "H2 electrolysis"
+        ],
+        "EVs": n_calc.links_t.p0.loc[:, n_calc.links.carrier == "BEV charger"],
+        "heatpump": n_calc.links_t.p0.loc[
+            :, n_calc.links.carrier == "heat pump charger"
+        ],
+        "resistive": n_calc.links_t.p0.loc[
+            :, n_calc.links.carrier == "resistive heating charger"
+        ],
+    }
+
+    # Map link-based loads to their corresponding buses
+    for key, df in sector_loads.items():
+        if key != "AC":
+            df.columns = df.columns.map(n_calc.links.bus0)
+
+    # Calculate total average price across all sectors
+    load_total = sum(sector_loads.values())
+
+    # If hourly prices are requested, compute the hourly total average price
+    if hourly:
+        if load_total.empty:
+            return pd.Series()
+        return (
+            ((load_total * lmp).sum(axis=1) / load_total.sum(axis=1))
+            .to_frame("price")
+            .T
+        )
+
+    # Calculate weighted average prices
+    sector_prices = {k: weighted_avg_price(df) for k, df in sector_loads.items()}
+    sector_prices["total"] = weighted_avg_price(load_total)
+
+    # Create results DataFrame
+    avg_prices = pd.DataFrame(
+        {
+            "region": "DEU",
+            "general_carrier": list(sector_prices.keys()),
+            "value": list(sector_prices.values()),
+        }
+    )
+
+    return avg_prices
 
 
 def calculate_markups_supply(n, comps, grouper, z_cutoff, map_to_remind):
@@ -419,22 +458,23 @@ def calculate_markups_supply(n, comps, grouper, z_cutoff, map_to_remind):
     map_to_remind: bool
         Whether to map the general carrier names to REMIND carrier names.
     """
+
+    # Get average electricity price
+    load_prices = calculate_electricity_prices(n, z_cutoff)
+    load_price_avg = load_prices.query("general_carrier == 'total'").value.values[0]
+
     # Cutoff scarcity prices if configured
-    if z_cutoff:
-        n_calc = cutoff_scarcity_prices(n, z_cutoff)
-    else:
-        n_calc = n
+    n_calc = cutoff_scarcity_prices(n, z_cutoff) if z_cutoff else n
 
     # Calculate markups for the supply side
     market_value = n_calc.statistics.market_value(comps=comps, groupby=grouper)
 
-    # Get average electricity price
-    load_price_ac = (
-        calculate_load_prices(n_calc, grouper).query("general_carrier == 'AC'").value[0]
-    )
-
     # Subtract average electricity price from market value to get markup
-    markups_supply = market_value - load_price_ac
+    markups_supply = market_value - load_price_avg
+
+    # If NA set to 0
+    markups_supply = markups_supply.fillna(0)
+
     markups_supply = (
         markups_supply.to_frame("value")
         .reset_index()
@@ -450,7 +490,6 @@ def calculate_markups_demand(n, grouper, z_cutoff, map_to_remind):
     """
     Calculate markups for the demand side, i.e.
     electricity prices paid by differend end-users.
-    Currently only implemented for electrolysis.
 
     Parameters
     ----------
@@ -463,60 +502,20 @@ def calculate_markups_demand(n, grouper, z_cutoff, map_to_remind):
     map_to_remind: bool
         Whether to map the general carrier names to REMIND carrier names.
     """
-    # Cutoff scarcity prices if configured
-    if z_cutoff:
-        n_calc = cutoff_scarcity_prices(n, z_cutoff)
-    else:
-        n_calc = n
-
-    # Electrolysis generation series
-    gen = n_calc.links_t.p0.loc[:, n_calc.links.carrier == "H2 electrolysis"]
-    gen.columns = gen.columns.map(n_calc.links.bus0)
-    gen = gen.T.groupby(level=0).sum().T
-    # Local marginal price
-    lmp = n_calc.buses_t.marginal_price.loc[:, gen.columns]
-    # Calculate market value
-    mv = (gen * lmp).sum().sum() / gen.sum().sum()
 
     # Get average electricity price
-    load_price_ac = (
-        calculate_load_prices(n_calc, grouper).query("general_carrier == 'AC'").value[0]
-    )
+    load_prices = calculate_electricity_prices(n, z_cutoff)
+    load_price_avg = load_prices.query("general_carrier == 'total'").value.values[0]
 
-    # Subtract average electricity price from market value to get markup
-    markup_electrolysis = mv - load_price_ac
+    # Calculate markups for the demand side
+    markups_demand = load_prices.copy()
+    markups_demand["value"] -= load_price_avg
+    markups_demand = markups_demand.query(
+        "general_carrier != 'total'"
+    )  # Remove total average price
 
-    # Calculate markups for EV charging
-    gen = n_calc.links_t.p0.loc[:, n_calc.links.carrier == "BEV charger"]
-    gen.columns = gen.columns.map(n_calc.links.bus0)
-    gen = gen.T.groupby(level=0).sum().T
-    # Local marginal price
-    lmp = n_calc.buses_t.marginal_price.loc[:, gen.columns]
-    # Calculate market value
-    mv = (gen * lmp).sum().sum() / gen.sum().sum()
-
-    # Subtract average electricity price from market value to get markup
-    markup_evs = mv - load_price_ac
-    
-    # Replace NA with 0
-    markup_electrolysis = markup_electrolysis if not np.isnan(markup_electrolysis) else 0
-    markup_evs = markup_evs if not np.isnan(markup_evs) else 0
-
-    # Create DataFrame
-    markups_demand = pd.DataFrame(
-        [
-            {
-                "region": "DEU",
-                "general_carrier": "electrolysis",
-                "value": markup_electrolysis,
-            },
-            {
-                "region": "DEU",
-                "general_carrier": "EVs",
-                "value": markup_evs,
-            },
-        ]
-    )
+    # If NA set to 0
+    markups_demand["value"] = markups_demand["value"].fillna(0)
 
     return process_data(markups_demand, cols=grouper, map_to_remind=map_to_remind)
 
@@ -552,7 +551,13 @@ def calculate_peak_residual_loads(n, grouper, kind):
     residual_load = (
         n.statistics.energy_balance(
             comps=["Generator", "Store", "StorageUnit", "Load"],
-            bus_carrier="AC",
+            # Add all carriers to which electricity loads are attached
+            bus_carrier=[
+                "AC",
+                "EV battery",
+                "heat pump electricity",
+                "resistive heating electricity",
+            ],
             groupby=[grouper, "peak_residual_load"],
             aggregate_time=False,
         )
@@ -613,10 +618,14 @@ def calculate_availability_factors(n, comps, grouper, map_to_remind):
     snapshot_weightings = n.snapshot_weightings.generators
 
     # 3. Aggregate over time using weighting
-    weighted_availability = (availability.T @ snapshot_weightings) / snapshot_weightings.sum()
+    weighted_availability = (
+        availability.T @ snapshot_weightings
+    ) / snapshot_weightings.sum()
 
     # 4. Attach generator attributes (like carrier, technology) to availability
-    weighted_availability = weighted_availability.rename_axis('Generator').to_frame('availability')
+    weighted_availability = weighted_availability.rename_axis("Generator").to_frame(
+        "availability"
+    )
     weighted_availability = weighted_availability.join(n.generators[grouper])
 
     # 5. Group by desired category (e.g., carrier, bus, technology) and sum
@@ -625,9 +634,9 @@ def calculate_availability_factors(n, comps, grouper, map_to_remind):
     # 6. Now divide by total capacity
     total_capacity = n.generators.groupby(grouper).p_nom_opt.sum()
 
-    df['value'] = df['availability'] / total_capacity
-    
-    df = df.drop(columns=['availability']).reset_index()
+    df["value"] = df["availability"] / total_capacity
+
+    df = df.drop(columns=["availability"]).reset_index()
 
     return process_data(df, cols=grouper, map_to_remind=map_to_remind)
 
@@ -696,8 +705,11 @@ def calculate_optimal_capacities(n, comps, grouper, weigh_by_remind, year=None):
             "general_carrier != 'BEV charger'"
         )
         # Drop EV batteries for now
+        optimal_capacities = optimal_capacities.query("general_carrier != 'EV battery'")
+        # Drop heating links for now
+        optimal_capacities = optimal_capacities.query("general_carrier != 'heat pump'")
         optimal_capacities = optimal_capacities.query(
-            "general_carrier != 'EV battery'"
+            "general_carrier != 'resistive heating'"
         )
         # Ensure year is provided
         if year is None:
@@ -726,7 +738,14 @@ def calculate_grid_losses(n, grouper="region", kind="relative"):
         grid_loss_abs = pd.Series(0, index=regions, name="absolute")
         grid_loss_abs.index.name = "region"
     grid_loss_rel = grid_loss_abs / n.statistics.withdrawal(
-        comps="Load", bus_carrier = ["AC", "EV battery"], groupby=grouper
+        comps="Load",
+        bus_carrier=[
+            "AC",
+            "EV battery",
+            "heat pump electricity",
+            "resistive heating electricity",
+        ],
+        groupby=grouper,
     )
 
     grid_loss = pd.DataFrame(
@@ -787,7 +806,14 @@ def calculate_link_generation(n, carrier, grouper, kind="relative"):
 
     # Calculate relative supply
     relative_supply = absolute_supply / n.statistics.withdrawal(
-        comps="Load", bus_carrier = ["AC", "EV battery"], groupby=grouper
+        comps="Load",
+        bus_carrier=[
+            "AC",
+            "EV battery",
+            "heat pump electricity",
+            "resistive heating electricity",
+        ],
+        groupby=grouper,
     )
 
     # Combine absolute and relative supply into a DataFrame
@@ -1136,10 +1162,7 @@ def calculate_market_values_supply(n, comps, grouper, z_cutoff):
         Z-score above which to cut off scarcity prices.
     """
     # Cutoff scarcity prices if configured
-    if z_cutoff:
-        n_calc = cutoff_scarcity_prices(n, z_cutoff)
-    else:
-        n_calc = n
+    n_calc = cutoff_scarcity_prices(n, z_cutoff) if z_cutoff else n
 
     # Calculate the market values (round-about way as the intended method of the statistics module is not yet available)
     market_values_supply = n_calc.statistics.market_value(
@@ -1149,63 +1172,6 @@ def calculate_market_values_supply(n, comps, grouper, z_cutoff):
     market_values_supply = market_values_supply.to_frame("value").reset_index()
 
     return market_values_supply
-
-
-def calculate_market_values_demand(n, z_cutoff):
-    """
-    Calculate market values for demand-side end-users.
-
-    Parameters
-    ----------
-    n : pypsa.Network
-        Network to calculate market values for.
-    grouper : list
-        List of columns to group the market values by.
-    z_cutoff: float
-        Z-score above which to cut off scarcity prices.
-    """
-    # Cutoff scarcity prices if configured
-    if z_cutoff:
-        n_calc = cutoff_scarcity_prices(n, z_cutoff)
-    else:
-        n_calc = n
-
-    # Electrolysis generation series
-    gen = n_calc.links_t.p0.loc[:, n_calc.links.carrier == "H2 electrolysis"]
-    gen.columns = gen.columns.map(n_calc.links.bus0)
-    gen = gen.T.groupby(level=0).sum().T
-    # Local marginal price
-    lmp = n_calc.buses_t.marginal_price.loc[:, gen.columns]
-    # Calculate market value
-    mv_electrolysis = (gen * lmp).sum().sum() / gen.sum().sum()
-
-    # EV load series
-    # TODO: This is the same as the load price at the EV battery bus, simplify
-    gen = n_calc.loads_t.p.loc[:, n_calc.loads.carrier == "land transport EV"]
-    gen.columns = gen.columns.map(n_calc.loads.bus)
-    gen = gen.T.groupby(level=0).sum().T
-    # Local marginal price
-    lmp = n_calc.buses_t.marginal_price.loc[:, gen.columns]
-    # Calculate market value
-    mv_evs = (gen * lmp).sum().sum() / gen.sum().sum()
-
-    # Create DataFrame
-    market_values_demand = pd.DataFrame(
-        [
-            {
-                "region": "DEU",
-                "general_carrier": "electrolysis",
-                "value": mv_electrolysis,
-            },
-            {
-                "region": "DEU",
-                "general_carrier": "EVs",
-                "value": mv_evs,
-            },
-        ]
-    )
-
-    return market_values_demand
 
 
 def calculate_curtailments(n, grouper):
@@ -1226,36 +1192,6 @@ def calculate_curtailments(n, grouper):
     return curtailments
 
 
-# TODO: Check implementation and compare with other options
-def calculate_hourly_prices(n, grouper):
-    """
-    Calculate hourly prices for the network.
-
-    Parameters
-    ----------
-    n : pypsa.Network
-        Network to calculate hourly prices for.
-    grouper : list
-        List of columns to group the hourly prices by.
-    """
-    # Calculate hourly prices
-    hourly_prices = n.statistics.revenue(
-        comps=["Load"],
-        groupby=grouper,
-        aggregate_time=False,
-    ) / (
-        -1
-        * n.statistics.withdrawal(
-            comps=["Load"],
-            groupby=grouper,
-            aggregate_time=False,
-        )
-    )
-    hourly_prices = hourly_prices.reset_index()
-
-    return hourly_prices
-
-
 # %%
 if __name__ == "__main__":
     if "snakemake" not in globals():
@@ -1263,20 +1199,21 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "export_to_REMIND",
-            configfiles="resources/PyPSA_PkBudg1000_DEU_rm350_pypsa202504_bounds_2025-05-07_11.04.32/i1/config.remind_scenario.yaml",
+            configfiles="resources/TEST/i1/config.remind_scenario.yaml",
             iteration="1",
-            scenario="PyPSA_PkBudg1000_DEU_rm350_pypsa202504_bounds_2025-05-07_11.04.32",
+            scenario="TEST",
         )
 
         # Manual input for testing
         fp_networks = [
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_3H-Ep137.1.nc",
+            # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_3H-Ep137.1.nc",
+            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
         ]
         fp_triggers_op = [
-            #f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_trigger",
+            # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_trigger",
         ]
         fp_triggers_op_perturb = [
-            #f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_perturb_biomass_trigger",
+            # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_perturb_biomass_trigger",
             f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_perturb_CCGT_trigger",
         ]
     else:
@@ -1529,17 +1466,15 @@ if __name__ == "__main__":
             "params": {"grouper": "region", "kind": "absolute"},
         },
         "load_prices": {
-            "func": calculate_load_prices_with_cutoff,
+            "func": calculate_electricity_prices,
             "params": {
-                "grouper": ["region", "general_carrier"],
                 "z_cutoff": False,
             },
         },
         # TODO: Make cutoff another column in load_prices instead
         "load_prices_cutoff": {
-            "func": calculate_load_prices_with_cutoff,
+            "func": calculate_electricity_prices,
             "params": {
-                "grouper": ["region", "general_carrier"],
                 "z_cutoff": snakemake.config["remind_coupling"]["export_to_REMIND"][
                     "z_cutoff"
                 ],
@@ -1564,26 +1499,13 @@ if __name__ == "__main__":
                 ],
             },
         },
-        "market_values_demand": {
-            "func": calculate_market_values_demand,
-            "params": {"z_cutoff": False},
-        },
-        # TODO: Make cutoff another column in market_values_demand instead
-        "market_values_demand_cutoff": {
-            "func": calculate_market_values_demand,
-            "params": {
-                "z_cutoff": snakemake.config["remind_coupling"]["export_to_REMIND"][
-                    "z_cutoff"
-                ]
-            },
-        },
         "curtailments": {
             "func": calculate_curtailments,
             "params": {"grouper": ["region", "general_carrier"]},
         },
         "hourly_prices": {
-            "func": calculate_hourly_prices,
-            "params": {"grouper": ["region", "general_carrier"]},
+            "func": calculate_electricity_prices,
+            "params": {"hourly": True, "z_cutoff": False},
         },
     }
 
