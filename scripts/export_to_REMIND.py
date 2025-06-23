@@ -383,7 +383,7 @@ def calculate_electricity_prices(n, z_cutoff, hourly=False):
     n_calc = cutoff_scarcity_prices(n, z_cutoff) if z_cutoff else n
 
     # Extract AC loads and corresponding locational marginal prices (LMPs)
-    load_ac = n_calc.loads_t.p.loc[:, n_calc.loads.general_carrier == "AC"]
+    load_ac = n_calc.loads_t.p_set.loc[:, n_calc.loads.general_carrier == "AC"]
     lmp = n_calc.buses_t.marginal_price.loc[:, load_ac.columns]
 
     def weighted_avg_price(load_df):
@@ -400,10 +400,10 @@ def calculate_electricity_prices(n, z_cutoff, hourly=False):
         ],
         "EVs": n_calc.links_t.p0.loc[:, n_calc.links.carrier == "BEV charger"],
         "heatpump": n_calc.links_t.p0.loc[
-            :, n_calc.links.carrier == "heat pump charger"
+            :, n_calc.links.carrier == "heat pump"
         ],
         "resistive": n_calc.links_t.p0.loc[
-            :, n_calc.links.carrier == "resistive heating charger"
+            :, n_calc.links.carrier == "resistive heating"
         ],
     }
 
@@ -1199,15 +1199,15 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "export_to_REMIND",
-            configfiles="resources/TEST/i1/config.remind_scenario.yaml",
+            configfiles="resources/PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heatingExport_2025-06-20_14.49.59/i1/config.remind_scenario.yaml",
             iteration="1",
-            scenario="TEST",
+            scenario="PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heatingExport_2025-06-20_14.49.59",
         )
 
         # Manual input for testing
         fp_networks = [
-            # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_3H-Ep137.1.nc",
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
+            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/base_s_4_elec_3H-Ep131.8.nc",
+            #f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
         ]
         fp_triggers_op = [
             # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_trigger",

@@ -331,6 +331,7 @@ rule import_REMIND_load:
         remind_data=SCENARIO_RESOURCES + "i{iteration}/REMIND2PyPSAEUR.gdx",
     output:
         load_scaling_factor=SCENARIO_RESOURCES + "i{iteration}/y{year}/load_scaling_factor.csv",
+        sectoral_load=SCENARIO_RESOURCES + "i{iteration}/y{year}/sectoral_load.csv",
     log:
         LOGS + "{scenario}/i{iteration}/y{year}/import_REMIND_load.log",
     benchmark:

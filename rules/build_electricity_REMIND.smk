@@ -720,6 +720,7 @@ rule add_electricity_REMIND:
         technology_cost_mapping="config/technology_cost_mapping.csv",
         remind_data=SCENARIO_RESOURCES + "i{iteration}/REMIND2PyPSAEUR.gdx",
         load_scaling_factor=SCENARIO_RESOURCES + "i{iteration}/y{year}/load_scaling_factor.csv",
+        sectoral_load=SCENARIO_RESOURCES + "i{iteration}/y{year}/sectoral_load.csv",
     output:
         SCENARIO_RESOURCES
         + "i{iteration}/y{year}/networks/base_s_{clusters}_elec.nc",

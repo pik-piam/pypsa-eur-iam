@@ -1652,12 +1652,10 @@ def attach_hydrogen_demand_per_node(
 def add_EVs_REMIND(n, options_ev):
 
     # Read in electricity demand for EVs
-    ev_load = read_remind_data(
-        snakemake.input.remind_data,
-        "p32_load_EVs",
-        rename_columns={"ttot": "year", "all_regi": "region"},
-    ).query("year == @snakemake.wildcards.year")
-    ev_load["value"] *= 1e6 * 8760  # convert from TWa to MWh
+    ev_load = pd.read_csv(
+        snakemake.input.sectoral_load
+    )
+    ev_load = ev_load[ev_load["sector"] == "EVs"]
 
     # Read in transport demand in units driven km [100 km]
     transport = pd.read_csv(
@@ -1773,7 +1771,6 @@ def add_heat_REMIND(
     n: pypsa.Network,
     cop_profiles_file: str,
     hourly_heat_demand_total_file: str,
-    fp_remind_data: str,
     options_heat: dict,
 ):
     """
@@ -1802,31 +1799,17 @@ def add_heat_REMIND(
     elec_hp_profile = heat_demand / cop_heat_pump
     
     # Get electricity for heat pumps from REMIND
-    elec_heat_pump_REMIND = (
-        read_remind_data(
-            fp_remind_data,
-            "p32_load_heatpump",  # TODO: p32_load_heatpump
-            rename_columns={"ttot": "year", "all_regi": "region"},
-        )
-        .query("year == @snakemake.wildcards.year")
-        .drop(columns="year")
-    )
-    elec_heat_pump_REMIND["value"] *= 1e6 * 8760  # convert from TWa to MWh
+    elec_heat_pump_REMIND = pd.read_csv(
+        snakemake.input.sectoral_load
+    ).query("sector == 'heatpump'")
     
     # Scale elec_hp_demand such that the sum corresponds to the total electricity demand for heat pumps from REMIND
     elec_hp_profile_REMIND = elec_hp_profile * (elec_heat_pump_REMIND.value / elec_hp_profile.sum().sum()).values[0]
      
     # Get electricity for resistive heating from REMIND
-    elec_resistive_REMIND = (
-        read_remind_data(
-            fp_remind_data,
-            "p32_load_resistive",  # TODO: p32_load_resistive
-            rename_columns={"ttot": "year", "all_regi": "region"},
-        )
-        .query("year == @snakemake.wildcards.year")
-        .drop(columns="year")
-    )
-    elec_resistive_REMIND["value"] *= 1e6 * 8760  # convert from TWa to MWh
+    elec_resistive_REMIND = pd.read_csv(
+        snakemake.input.sectoral_load
+    ).query("sector == 'resistive'")
     
     # Resistive heating is independant of the outside temperature, therefore scale heat_demand profile
     elec_resistive_profile_REMIND = heat_demand * (elec_resistive_REMIND.value / heat_demand.sum().sum()).values[0]
@@ -1916,9 +1899,9 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "add_electricity_REMIND",
-            scenario="TEST",
+            scenario="PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heatingExport_2025-06-20_14.49.59",
             iteration="1",
-            year="2050",
+            year="2030",
             clusters=4,
         )
     configure_logging(snakemake)
@@ -2117,7 +2100,6 @@ if __name__ == "__main__":
             cop_profiles_file=snakemake.input.cop_profiles,
             hourly_heat_demand_total_file=snakemake.input.hourly_heat_demand_total,
             options_heat=sc_settings["heating"],
-            fp_remind_data=snakemake.input["remind_data"],
         )
 
     sanitize_carriers(n, snakemake.config)
