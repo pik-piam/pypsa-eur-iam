@@ -381,10 +381,15 @@ def calculate_electricity_prices(n, z_cutoff, hourly=False):
     """
     # Cutoff scarcity prices if configured
     n_calc = cutoff_scarcity_prices(n, z_cutoff) if z_cutoff else n
+    # Get snapshots that are cut off
+    snapshots_cutoff = n_calc.snapshot_weightings[(n_calc.snapshot_weightings == 0).any(axis=1)].index
 
     # Extract AC loads and corresponding locational marginal prices (LMPs)
     load_ac = n_calc.loads_t.p_set.loc[:, n_calc.loads.general_carrier == "AC"]
     lmp = n_calc.buses_t.marginal_price.loc[:, load_ac.columns]
+    # Set lmp to zero for snapshots where the cutoff is applied
+    # Need to do this manually here as we're not using n.statistics
+    lmp.loc[snapshots_cutoff, :] = 0
 
     def weighted_avg_price(load_df):
         """Helper to compute the weighted average electricity price."""
@@ -1199,14 +1204,14 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "export_to_REMIND",
-            configfiles="resources/PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heatingExport_2025-06-20_14.49.59/i1/config.remind_scenario.yaml",
-            iteration="1",
-            scenario="PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heatingExport_2025-06-20_14.49.59",
+            configfiles="resources/PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heating_2025-06-23_11.23.06/i5/config.remind_scenario.yaml",
+            iteration="5",
+            scenario="PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heating_2025-06-23_11.23.06",
         )
 
         # Manual input for testing
         fp_networks = [
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/base_s_4_elec_3H-Ep131.8.nc",
+            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2070/networks/base_s_4_elec_3H-Ep261.2.nc",
             #f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
         ]
         fp_triggers_op = [
