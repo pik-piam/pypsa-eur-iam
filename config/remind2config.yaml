@@ -55,6 +55,7 @@ enable_heating:
   switch_mapping:
     0: false
     1: true
+    2: true
 
 enable_flexible_heating:
   remind_switch: c32_pypsa_cfg_heating

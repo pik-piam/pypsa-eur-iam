@@ -96,7 +96,15 @@ if __name__ == "__main__":
             continue
         switch_value = convert_to_native_type(remind_data["value"][0])
         # Get the mapping for the switch value
-        new_value = switch_mapping.get(switch_value) if switch_mapping else switch_value
+        if switch_mapping is not None:
+            if switch_value not in switch_mapping:
+                logger.warning(
+                    f"Switch value {switch_value} for {remind_switch} not found in switch_mapping, skipping."
+                )
+                continue  # Skip this config update
+            new_value = switch_mapping[switch_value]
+        else:
+            new_value = switch_value  # If no switch_mapping, use value as-is
         # Update config
         set_nested_value(config, overwrite_pypsa, new_value)
 
