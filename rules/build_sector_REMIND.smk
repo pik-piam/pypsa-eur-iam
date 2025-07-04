@@ -249,6 +249,29 @@ rule build_hourly_heat_demand:
     script:
         "../scripts/build_hourly_heat_demand.py"
 
+# New rule to create hourly water heat demand based on BDEW space heating profile (!)
+# This looks more plausible than the flat water heat profile in the BDEW data
+rule build_hourly_water_heat_demand_REMIND:
+    params:
+        snapshots=config_provider("snapshots"),
+        drop_leap_day=config_provider("enable", "drop_leap_day"),
+    input:
+        heat_profile="data/heat_load_profile_BDEW.csv",
+        clustered_pop_layout=resources("pop_layout_base_s_{clusters}.csv"),
+    output:
+        water_heat_demand=resources("hourly_water_heat_demand_total_base_s_{clusters}.nc"),
+    resources:
+        mem_mb=2000,
+    threads: 8
+    log:
+        logs("build_hourly_water_heat_demand_total_s_{clusters}.loc"),
+    benchmark:
+        benchmarks("build_hourly_water_heat_demand/total_s_{clusters}")
+    conda:
+        "../envs/environment.yaml"
+    script:
+        "../scripts/build_hourly_water_heat_demand_REMIND.py"
+
 
 # Removed planning_horizons wildcard (in both rule and code)
 rule build_central_heating_temperature_profiles_REMIND:

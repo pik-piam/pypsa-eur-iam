@@ -1832,6 +1832,9 @@ def add_heat_REMIND(
     n: pypsa.Network,
     cop_profiles_file: str,
     hourly_heat_demand_total_file: str,
+    hourly_water_heat_demand_total_file: str,
+    # REMIND file with share of water heating in relation to total heat demand
+    wh_share_file: str,
     options_heat: dict,
 ):
     """
@@ -1842,46 +1845,83 @@ def add_heat_REMIND(
     """
     logger.info("Add heat sector")
 
-    # Get heat demand of residential and services
+    # Get share of water heating in relation to total heat demand
+    year = int(snakemake.wildcards.year)
+    # If year > 2100, use 2100 as the year for the share
+    year = 2100 if year > 2100 else year
+    wh_share = pd.read_csv(wh_share_file, index_col=0)
+    wh_share = wh_share[wh_share['year'] == year]
+
+    # Get electricity for heat pumps from REMIND
+    elec_hp_REMIND = pd.read_csv(snakemake.input.sectoral_load).query(
+        "sector == 'heatpump'"
+    ).value.values[0]
+    
+    # Get electricity for resistive heating from REMIND
+    elec_resistive_REMIND = pd.read_csv(snakemake.input.sectoral_load).query(
+        "sector == 'resistive'"
+    ).value.values[0]
+    
+    # Calculate share for water heating and space heating
+    elec_hp_space_REMIND = (
+        elec_hp_REMIND * (1 - wh_share.loc[wh_share["item"] == "heat pumps", "value"])
+    )
+    elec_hp_water_REMIND = (
+        elec_hp_REMIND * wh_share.loc[wh_share["item"] == "heat pumps", "value"]
+    )
+    elec_resistive_space_REMIND = (
+        elec_resistive_REMIND * (1 - wh_share.loc[wh_share["item"] == "resistive heating", "value"])
+    )
+    elec_resistive_water_REMIND = (
+        elec_resistive_REMIND * wh_share.loc[wh_share["item"] == "resistive heating", "value"]
+    )
+    
+    # Get space heating profile of residential and services
     heat_demand_total = (
         xr.open_dataset(hourly_heat_demand_total_file).to_dataframe().unstack(level=1)
     )
     heat_demand = (
         heat_demand_total["residential space"] + heat_demand_total["services space"]
     )
+    
+    # Get heat profile from BDEW, use this as the water heating
+    water_heat_demand_total = (
+        xr.open_dataset(hourly_water_heat_demand_total_file).to_dataframe()
+    )
 
-    # Get cop profile for heat pumps
+    # Get cop profile for heat pumps and select any profile
     cop = xr.open_dataarray(cop_profiles_file)
-
-    # Select any of the profiles
-    cop_heat_pump = (
+    cop = (
         cop.sel(heat_system="rural", heat_source="air")
         .to_pandas()
         .reindex(index=n.snapshots)
     )
 
-    # Calculate electricity demand for heat pumps
-    elec_hp_profile = heat_demand / cop_heat_pump
-
-    # Get electricity for heat pumps from REMIND
-    elec_heat_pump_REMIND = pd.read_csv(snakemake.input.sectoral_load).query(
-        "sector == 'heatpump'"
+    # Heat pumps: Get electricity demand profile by dividing by COP and rescale to match REMIND values
+    elec_hp_space_profile = heat_demand / cop
+    elec_hp_space_profile = (
+        elec_hp_space_profile * (elec_hp_space_REMIND / elec_hp_space_profile.sum().sum()).values[0]
     )
-
-    # Scale elec_hp_demand such that the sum corresponds to the total electricity demand for heat pumps from REMIND
-    elec_hp_profile_REMIND = (
-        elec_hp_profile
-        * (elec_heat_pump_REMIND.value / elec_hp_profile.sum().sum()).values[0]
+    elec_hp_water_profile = water_heat_demand_total / cop
+    elec_hp_water_profile = (
+        elec_hp_water_profile
+        * (elec_hp_water_REMIND / elec_hp_water_profile.sum().sum()).values[0]
     )
-
-    # Get electricity for resistive heating from REMIND
-    elec_resistive_REMIND = pd.read_csv(snakemake.input.sectoral_load).query(
-        "sector == 'resistive'"
+    # Combine space and water heating profiles
+    elec_hp_profile_total = (
+        elec_hp_space_profile + elec_hp_water_profile
     )
-
-    # Resistive heating is independant of the outside temperature, therefore scale heat_demand profile
-    elec_resistive_profile_REMIND = (
-        heat_demand * (elec_resistive_REMIND.value / heat_demand.sum().sum()).values[0]
+    
+    # Resistive heating: Rescale to match REMIND values
+    elec_resistive_space_profile = (
+        heat_demand * (elec_resistive_space_REMIND / heat_demand.sum().sum()).values[0]
+    )
+    elec_resistive_water_profile = (
+        water_heat_demand_total * (elec_resistive_water_REMIND / water_heat_demand_total.sum().sum()).values[0]
+    )
+    # Combine space and water heating profiles
+    elec_resistive_profile_total = (
+        elec_resistive_space_profile + elec_resistive_water_profile
     )
 
     # Add carriers
@@ -1914,7 +1954,7 @@ def add_heat_REMIND(
         suffix=" heat pump electricity",
         bus=spatial_nodes + " heat pump electricity",
         carrier="heat pump electricity",
-        p_set=elec_hp_profile_REMIND.loc[n.snapshots],
+        p_set=elec_hp_profile_total.loc[n.snapshots],
     )
     n.add(
         "Load",
@@ -1922,7 +1962,7 @@ def add_heat_REMIND(
         suffix=" resistive heating electricity",
         bus=spatial_nodes + " resistive heating electricity",
         carrier="resistive heating electricity",
-        p_set=elec_resistive_profile_REMIND.loc[n.snapshots],
+        p_set=elec_resistive_profile_total.loc[n.snapshots],
     )
 
     # Add links
@@ -1935,7 +1975,7 @@ def add_heat_REMIND(
         bus0=spatial_nodes,
         bus1=spatial_nodes + " heat pump electricity",
         # No need to make extendable, just allow max throughput
-        p_nom=elec_hp_profile_REMIND.loc[n.snapshots].sum(axis=1).max(),
+        p_nom=elec_hp_profile_total.loc[n.snapshots].sum(axis=1).max(),
         p_nom_extendable=False,
         efficiency=1,
         p_min_pu=0,  # Unidirectional link
@@ -1950,7 +1990,7 @@ def add_heat_REMIND(
         bus0=spatial_nodes,
         bus1=spatial_nodes + " resistive heating electricity",
         # No need to make extendable, just allow max throughput
-        p_nom=elec_resistive_profile_REMIND.loc[n.snapshots].sum(axis=1).max(),
+        p_nom=elec_resistive_profile_total.loc[n.snapshots].sum(axis=1).max(),
         p_nom_extendable=False,
         efficiency=1,
         p_min_pu=0,  # Unidirectional link
@@ -1961,7 +2001,7 @@ def add_heat_REMIND(
     if options_heat["dsm"]:
         # Estimate number of heat pumps
         number_hp = (
-            elec_heat_pump_REMIND["value"]
+            elec_hp_REMIND
             / options_heat["hp_avg_power"]
             / options_heat["hp_hours"]
         )
@@ -1971,24 +2011,25 @@ def add_heat_REMIND(
         thermal_storage_hp = (
             number_hp
             * options_heat["hp_tank_size"]
+            * options_heat["hp_tank_share"]
             * spec_heat_cap_water
             * options_heat["tank_delT"]
             * kj2mwh
         )
         # Distribute total thermal storage to spatial nodes by using heat_demand
         thermal_storage_hp_spatial = (
-            heat_demand.sum() * thermal_storage_hp.values[0]
+            heat_demand.sum() * thermal_storage_hp
         ) / heat_demand.sum().sum()
 
         # Calculate corresponding electricity storage size in MWh given time-dependent COP
-        elec_storage_hp_spatial = thermal_storage_hp_spatial / cop_heat_pump
+        elec_storage_hp_spatial = thermal_storage_hp_spatial / cop
         
         # Size of store is the maximum
         elec_storage_hp_max = elec_storage_hp_spatial.max()
         
         # Estimate number of resistive heaters
         number_resistive = (
-            elec_resistive_REMIND["value"]
+            elec_resistive_REMIND
             / options_heat["resistive_avg_power"]
             / options_heat["resistive_hours"]
         )
@@ -1997,13 +2038,14 @@ def add_heat_REMIND(
         thermal_storage_resistive = (
             number_resistive
             * options_heat["resistive_tank_size"]
+            * options_heat["resistive_tank_share"]
             * spec_heat_cap_water
             * options_heat["tank_delT"]
             * kj2mwh
         )
         # Distribute total thermal storage to spatial nodes by using heat_demand
         thermal_storage_resistive_spatial = (
-            heat_demand.sum() * thermal_storage_resistive.values[0]
+            heat_demand.sum() * thermal_storage_resistive
         ) / heat_demand.sum().sum()
         
         n.add(
@@ -2248,6 +2290,8 @@ if __name__ == "__main__":
             n,
             cop_profiles_file=snakemake.input.cop_profiles,
             hourly_heat_demand_total_file=snakemake.input.hourly_heat_demand_total,
+            hourly_water_heat_demand_total_file=snakemake.input.hourly_water_heat_demand_total,
+            wh_share_file=snakemake.input.wh_share,
             options_heat=sc_settings["heating"],
         )
 

@@ -59,13 +59,16 @@ remind_coupling:
       enable: false
       # Flexibility settings
       dsm: false
+      dsm_availability: 0.5  # Share of heating systems that can operate flexibly
       tank_delT: 40  # in °C, 40°C temperature difference
       hp_tank_size: 200  # in litres, 200 litre store
-      hp_avg_power: 0.006  # in MW, average heat pump 6 kW
+      hp_avg_power: 0.002  # in MW_el, average heat pump 6 kW_el, TODO: Include COP
       hp_hours: 2000  # in h, used for 2000 hours
-      resistive_avg_power: 0.004  # in MW, average resistive heater 4 kW
-      resistive_hours: 1000  # in h, used for 1000 hours
-      resistive_tank_size: 50  # in litres, 50 litre store
+      hp_tank_share: 0.9  # Share of heat pumps with tank storage
+      resistive_avg_power: 0.006  # in MW_el, average resistive heater 6 kW_el
+      resistive_hours: 500  # in h, used for 500 hours
+      resistive_tank_size: 200  # in litres, 200 litre store
+      resistive_tank_share: 0.1  # Share of resistive heaters with tank storage
   # Settings for the dispatch-only operations network
   solve_operations_network:
     enable: false

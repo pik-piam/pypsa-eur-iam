@@ -260,6 +260,10 @@ rule download_and_prepare:
             rules.build_cop_profiles_REMIND.output,
             clusters=config["scenario"]["clusters"]
         ),
+        expand(
+            rules.build_hourly_water_heat_demand_REMIND.output,
+            clusters=config["scenario"]["clusters"]
+        ),
         # Input data for hydrogen storage
         expand(
             "resources/salt_cavern_potentials_s_{clusters}.csv",

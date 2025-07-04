@@ -716,6 +716,13 @@ def calculate_optimal_capacities(n, comps, grouper, weigh_by_remind, year=None):
         optimal_capacities = optimal_capacities.query(
             "general_carrier != 'resistive heating'"
         )
+        # Drop heating stores
+        optimal_capacities = optimal_capacities.query(
+            "general_carrier != 'heat pump storage'"
+        )
+        optimal_capacities = optimal_capacities.query(
+            "general_carrier != 'resistive heating storage'"
+        )
         # Ensure year is provided
         if year is None:
             raise ValueError("Year must be provided to weigh by REMIND capacities")

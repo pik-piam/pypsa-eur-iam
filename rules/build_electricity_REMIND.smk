@@ -718,6 +718,7 @@ rule add_electricity_REMIND:
         # Heating input files
         hourly_heat_demand_total=resources("hourly_heat_demand_total_base_s_{clusters}.nc"),
         cop_profiles=resources("cop_profiles_base_s_{clusters}.nc"),
+        hourly_water_heat_demand_total=resources("hourly_water_heat_demand_total_base_s_{clusters}.nc"),
         # REMIND input
         region_mapping="config/regionmapping_21_EU11.csv",
         RCL_p_nom_limits=SCENARIO_RESOURCES + "i{iteration}/y{year}/RCL_p_nom_limits_updated_s_{clusters}.csv",
@@ -725,6 +726,7 @@ rule add_electricity_REMIND:
         remind_data=SCENARIO_RESOURCES + "i{iteration}/REMIND2PyPSAEUR.gdx",
         load_scaling_factor=SCENARIO_RESOURCES + "i{iteration}/y{year}/load_scaling_factor.csv",
         sectoral_load=SCENARIO_RESOURCES + "i{iteration}/y{year}/sectoral_load.csv",
+        wh_share="data/REMIND_SSP2_wh_share.csv"  # REMIND share of water heating
     output:
         SCENARIO_RESOURCES
         + "i{iteration}/y{year}/networks/base_s_{clusters}_elec.nc",
