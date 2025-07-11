@@ -201,25 +201,21 @@ def process_data(df, cols, map_to_remind):
     # Reset index
     df = df.reset_index().drop(columns=["level_0"], errors="ignore")
 
-    # Remove rows related to the additional hydrogen bus
-    if "general_carrier" in df.columns:
-        df = df.query(
-            "general_carrier not in ['H2 transfer to H2 demand REMIND', 'H2 demand buffer REMIND']"
-        )
+    # Drop rows
+    drop = [
+        "H2 transfer to H2 demand REMIND",
+        "H2 demand buffer REMIND",
+        "DC",
+        "BEV pass charger",
+        "BEV freight charger",
+        "EV pass battery",
+        "EV freight battery",
+        "heatpump",
+        "resistive",
+    ]
 
-    # Remove rows related to DC if available
     if "general_carrier" in df.columns:
-        df = df.query("general_carrier != 'DC'")
-
-    # Remove rows related to EVs if available
-    if "general_carrier" in df.columns:
-        df = df.query("general_carrier != 'BEV charger'")
-        df = df.query("general_carrier != 'EV battery'")
-
-    # Remove rows related to heating if available
-    if "general_carrier" in df.columns:
-        df = df.query("general_carrier != 'heat pump'")
-        df = df.query("general_carrier != 'resistive heating'")
+        df = df.query("general_carrier not in @drop")
 
     # Function to map and explode carrier columns
     def map_and_explode(df, column):
@@ -382,7 +378,9 @@ def calculate_electricity_prices(n, z_cutoff, hourly=False):
     # Cutoff scarcity prices if configured
     n_calc = cutoff_scarcity_prices(n, z_cutoff) if z_cutoff else n
     # Get snapshots that are cut off
-    snapshots_cutoff = n_calc.snapshot_weightings[(n_calc.snapshot_weightings == 0).any(axis=1)].index
+    snapshots_cutoff = n_calc.snapshot_weightings[
+        (n_calc.snapshot_weightings == 0).any(axis=1)
+    ].index
 
     # Extract AC loads and corresponding locational marginal prices (LMPs)
     load_ac = n_calc.loads_t.p_set.loc[:, n_calc.loads.general_carrier == "AC"]
@@ -403,13 +401,12 @@ def calculate_electricity_prices(n, z_cutoff, hourly=False):
         "electrolysis": n_calc.links_t.p0.loc[
             :, n_calc.links.carrier == "H2 electrolysis"
         ],
-        "EVs": n_calc.links_t.p0.loc[:, n_calc.links.carrier == "BEV charger"],
-        "heatpump": n_calc.links_t.p0.loc[
-            :, n_calc.links.carrier == "heat pump"
+        "EV_pass": n_calc.links_t.p0.loc[:, n_calc.links.carrier == "BEV pass charger"],
+        "EV_freight": n_calc.links_t.p0.loc[
+            :, n_calc.links.carrier == "BEV freight charger"
         ],
-        "resistive": n_calc.links_t.p0.loc[
-            :, n_calc.links.carrier == "resistive heating"
-        ],
+        "heatpump": n_calc.links_t.p0.loc[:, n_calc.links.carrier == "heatpump"],
+        "resistive": n_calc.links_t.p0.loc[:, n_calc.links.carrier == "resistive"],
     }
 
     # Map link-based loads to their corresponding buses
@@ -417,8 +414,9 @@ def calculate_electricity_prices(n, z_cutoff, hourly=False):
         if key != "AC":
             df.columns = df.columns.map(n_calc.links.bus0)
 
-    # Calculate total average price across all sectors
-    load_total = sum(sector_loads.values())
+    # Calculate total average price across all sectors, dropping empty sectors
+    sector_loads_nonempty = {k: df for k, df in sector_loads.items() if not df.empty}
+    load_total = sum(sector_loads_nonempty.values())
 
     # If hourly prices are requested, compute the hourly total average price
     if hourly:
@@ -559,9 +557,10 @@ def calculate_peak_residual_loads(n, grouper, kind):
             # Add all carriers to which electricity loads are attached
             bus_carrier=[
                 "AC",
-                "EV battery",
-                "heat pump electricity",
-                "resistive heating electricity",
+                "EV pass battery",
+                "EV fright battery",
+                "heatpump electricity",
+                "resistive electricity",
             ],
             groupby=[grouper, "peak_residual_load"],
             aggregate_time=False,
@@ -701,28 +700,21 @@ def calculate_optimal_capacities(n, comps, grouper, weigh_by_remind, year=None):
 
     # Weigh by REMIND capacities
     if weigh_by_remind:
+        drop = [
+            "DC",
+            "BEV pass charger",
+            "BEV freight charger",
+            "EV pass battery",
+            "EV freight battery",
+            "heatpump",
+            "resistive",
+            "heatpump storage",
+            "resistive storage",
+        ]
         # Drop
         optimal_capacities = optimal_capacities.drop(columns=["component"])
         # Drop DC link for now
-        optimal_capacities = optimal_capacities.query("general_carrier != 'DC'")
-        # Drop EV battery links for now
-        optimal_capacities = optimal_capacities.query(
-            "general_carrier != 'BEV charger'"
-        )
-        # Drop EV batteries for now
-        optimal_capacities = optimal_capacities.query("general_carrier != 'EV battery'")
-        # Drop heating links for now
-        optimal_capacities = optimal_capacities.query("general_carrier != 'heat pump'")
-        optimal_capacities = optimal_capacities.query(
-            "general_carrier != 'resistive heating'"
-        )
-        # Drop heating stores
-        optimal_capacities = optimal_capacities.query(
-            "general_carrier != 'heat pump storage'"
-        )
-        optimal_capacities = optimal_capacities.query(
-            "general_carrier != 'resistive heating storage'"
-        )
+        optimal_capacities = optimal_capacities.query("general_carrier not in @drop")
         # Ensure year is provided
         if year is None:
             raise ValueError("Year must be provided to weigh by REMIND capacities")
@@ -753,9 +745,9 @@ def calculate_grid_losses(n, grouper="region", kind="relative"):
         comps="Load",
         bus_carrier=[
             "AC",
-            "EV battery",
-            "heat pump electricity",
-            "resistive heating electricity",
+            "EV pass battery",
+            "heatpump electricity",
+            "resistive electricity",
         ],
         groupby=grouper,
     )
@@ -821,9 +813,10 @@ def calculate_link_generation(n, carrier, grouper, kind="relative"):
         comps="Load",
         bus_carrier=[
             "AC",
-            "EV battery",
-            "heat pump electricity",
-            "resistive heating electricity",
+            "EV pass battery",
+            "EV freight battery",
+            "heatpump electricity",
+            "resistive electricity",
         ],
         groupby=grouper,
     )
@@ -1211,25 +1204,24 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "export_to_REMIND",
-            configfiles="resources/PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heating_2025-06-23_11.23.06/i5/config.remind_scenario.yaml",
-            iteration="5",
-            scenario="PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heating_2025-06-23_11.23.06",
+            configfiles="resources/PyPSA_PkBudg1000_start2030_fixRelShare_noFlex_2025-07-11_11.56.38/i1/config.remind_scenario.yaml",
+            iteration="1",
+            scenario="PyPSA_PkBudg1000_start2030_fixRelShare_noFlex_2025-07-11_11.56.38",
         )
 
         # Manual input for testing
         fp_networks = [
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2070/networks/base_s_4_elec_3H-Ep261.2.nc",
-            #f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
+            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_1H-Ep137.1.nc",
+            # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
         ]
         fp_triggers_op = [
             # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_trigger",
         ]
         fp_triggers_op_perturb = [
             # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_perturb_biomass_trigger",
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2030/networks/elec_s_4_ec_lcopt_3H-Ep131.8_op_perturb_CCGT_trigger",
         ]
     else:
-        fp_networks = snakemake.input["networks"]  # For testing this doesn't work
+        fp_networks = snakemake.input["networks"]
         fp_triggers_op = snakemake.input["triggers_op"]
         fp_triggers_op_perturb = snakemake.input["triggers_op_perturb"]
 
@@ -1270,6 +1262,7 @@ if __name__ == "__main__":
                 "map_to_remind": True,
             },
             "gdx": {
+                "name": "p32_PyPSA_CF",
                 "description": "Capacity factors of generators and links [1]",
                 "dims": ["year", "region", "carrier"],
             },
@@ -1285,6 +1278,7 @@ if __name__ == "__main__":
                 "map_to_remind": True,
             },
             "gdx": {
+                "name": "p32_PyPSA_MarkupSupply",
                 "description": "Markups of supply-side generators [$/MWh]",
                 "dims": ["year", "region", "carrier"],
             },
@@ -1299,6 +1293,7 @@ if __name__ == "__main__":
                 "map_to_remind": False,
             },
             "gdx": {
+                "name": "p32_PyPSA_MarkupDemand",
                 "description": "Markups of demand-side end-users [$/MWh]",
                 "dims": ["year", "region", "enduse"],
             },
@@ -1307,6 +1302,7 @@ if __name__ == "__main__":
             "func": calculate_peak_residual_loads,
             "params": {"grouper": "region", "kind": "relative"},
             "gdx": {
+                "name": "p32_PyPSA_PeakResLoadRel",
                 "description": "Peak residual load relative to load [1]",
                 "dims": ["year", "region"],
             },
@@ -1319,6 +1315,7 @@ if __name__ == "__main__":
                 "map_to_remind": True,
             },
             "gdx": {
+                "name": "p32_PyPSA_AF",
                 "description": "Availability factors of generators [1]",
                 "dims": ["year", "region", "carrier"],
             },
@@ -1330,6 +1327,7 @@ if __name__ == "__main__":
                 "year": "placeholder",
             },  # Year inserted in loop
             "gdx": {
+                "name": "p32_PyPSA_shPe2seel",
                 "description": "Generation shares of technologies [1]",
                 "dims": ["year", "region", "carrier"],
             },
@@ -1338,6 +1336,7 @@ if __name__ == "__main__":
             "func": calculate_potentials,
             "params": {"grouper": ["region", "general_carrier"], "map_to_remind": True},
             "gdx": {
+                "name": "p32_PyPSA_Potential",
                 "description": "Potentials of renewable technologies [MW]",
                 "dims": ["year", "region", "carrier"],
             },
@@ -1353,6 +1352,7 @@ if __name__ == "__main__":
                 "year": "placeholder",
             },  # Year inserted in loop
             "gdx": {
+                "name": "p32_PyPSA_OptCap",
                 "description": "Optimal capacities of technologies, ATTENTION for links w.r.t. input [MW or MWh]",
                 "dims": ["year", "region", "carrier"],
             },
@@ -1365,6 +1365,7 @@ if __name__ == "__main__":
                 "kind": "relative",
             },
             "gdx": {
+                "name": "p32_PyPSA_H2TurbRel",
                 "description": " Hydrogen turbine generation relative to load [1]",
                 "dims": ["year", "region"],
             },
@@ -1377,6 +1378,7 @@ if __name__ == "__main__":
                 "kind": "relative",
             },
             "gdx": {
+                "name": "p32_PyPSA_BatteryDischargeRel",
                 "description": "Battery generation relative to load [1]",
                 "dims": ["year", "region"],
             },
@@ -1385,6 +1387,7 @@ if __name__ == "__main__":
             "func": calculate_grid_losses,
             "params": {"grouper": "region", "kind": "relative"},
             "gdx": {
+                "name": "p32_PyPSA_GridLossesRel",
                 "description": "Grid losses relative to load [1]",
                 "dims": ["year", "region"],
             },
@@ -1399,6 +1402,7 @@ if __name__ == "__main__":
                 "map_to_remind": False,  # Applies to property_func
             },
             "gdx": {
+                "name": "p32_PyPSA_DQ_CF",
                 "description": "Difference quotients of capacity factors w.r.t. capacity [1/MW]",
                 "dims": ["year", "region", "carrier", "carrier"],
             },
@@ -1416,6 +1420,7 @@ if __name__ == "__main__":
                 "map_to_remind": False,  # Applies to propert_func
             },
             "gdx": {
+                "name": "p32_PyPSA_DQ_MarkupSupply",
                 "description": "Difference quotients of supply-side markups w.r.t. capacity [($/MWh)/MW]",
                 "dims": ["year", "region", "carrier", "carrier"],
             },
@@ -1726,9 +1731,10 @@ if __name__ == "__main__":
 
     # Add all coupling parameters to GDX
     for key, df in coupling_parameters.items():
+        parameter_name = coupling_functions[key]["gdx"].get("name", key)
         gt.Parameter(
             gdx,
-            name=key,
+            name=parameter_name,
             domain=coupling_functions[key]["gdx"]["dims"],
             records=df,
             description=coupling_functions[key]["gdx"]["description"],

@@ -4,6 +4,7 @@
 # Note: The time resolution (c32_pypsa_cfg_nodes) and spatial resolution (c32_pypsa_cfg_hourly_res)
 # are integrated via the wildcards that are set to scenario_wildcards.csv in import_REMIND_config.py
 
+# RCL (Region-Capacity-Limit settings) used to pass free capacity to PyPSA
 enable_RCL_generators:
   remind_switch: c32_pypsa_cfg_rcl_generators
   overwrite_pypsa: remind_coupling.preinvestment_capacities.generators
@@ -33,38 +34,72 @@ cost_of_RCL_components:
   remind_switch: c32_pypsa_cfg_rcl_cost
   overwrite_pypsa: remind_coupling.preinvestment_capacities.capital_cost
 
-enable_EVs:
+# Sector coupling settings (Passenger EVs, Freight EVs, Heat pumps, Resistive heating)
+enable_EV_pass:
   remind_switch: c32_pypsa_cfg_EVs
-  overwrite_pypsa: remind_coupling.sector_coupling.EVs.enable
+  overwrite_pypsa: remind_coupling.sector_coupling.EV_pass.enable
   switch_mapping:
     0: false
     1: true
     2: true
 
-enable_flexible_EVs:
+enable_EV_pass_dsm:
   remind_switch: c32_pypsa_cfg_EVs
-  overwrite_pypsa: remind_coupling.sector_coupling.EVs.dsm
+  overwrite_pypsa: remind_coupling.sector_coupling.EV_pass.dsm
   switch_mapping:
     0: false
     1: false
     2: true
 
-enable_heating:
+# enable_EV_freight:
+#   remind_switch: c32_pypsa_cfg_EVs
+#   overwrite_pypsa: remind_coupling.sector_coupling.EV_freight.enable
+#   switch_mapping:
+#     0: false
+#     1: true
+#     2: true
+
+# enable_EV_freight_dsm:
+#   remind_switch: c32_pypsa_cfg_EVs
+#   overwrite_pypsa: remind_coupling.sector_coupling.EV_freight.dsm
+#   switch_mapping:
+#     0: false
+#     1: false
+#     2: true
+
+enable_heat_pumps:
   remind_switch: c32_pypsa_cfg_heating
-  overwrite_pypsa: remind_coupling.sector_coupling.heating.enable
+  overwrite_pypsa: remind_coupling.sector_coupling.heat_pumps.enable
   switch_mapping:
     0: false
     1: true
     2: true
 
-enable_flexible_heating:
+enable_heat_pumps_dsm:
   remind_switch: c32_pypsa_cfg_heating
-  overwrite_pypsa: remind_coupling.sector_coupling.heating.dsm
+  overwrite_pypsa: remind_coupling.sector_coupling.heat_pumps.dsm
   switch_mapping:
     0: false
     1: false
     2: true
 
+enable_resistive:
+  remind_switch: c32_pypsa_cfg_heating
+  overwrite_pypsa: remind_coupling.sector_coupling.resistive.enable
+  switch_mapping:
+    0: false
+    1: true
+    2: true
+
+enable_resistive_dsm:
+  remind_switch: c32_pypsa_cfg_heating
+  overwrite_pypsa: remind_coupling.sector_coupling.resistive.dsm
+  switch_mapping:
+    0: false
+    1: false
+    2: true
+
+# Calculate perturbed scenarios (to numerically determine partial derivative)
 enable_perturbed_scenarios:
   remind_switch: c32_pypsa_cfg_perturb
   overwrite_pypsa: remind_coupling.solve_perturbed_network.enable

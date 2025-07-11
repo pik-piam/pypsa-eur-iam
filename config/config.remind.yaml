@@ -29,8 +29,7 @@ remind_coupling:
     min_fill_battery: 0.15  # e_min_pu of battery store
   # Sector coupling settings (hydrogen, EVs, etc.)
   sector_coupling:
-    # Additional hydrogen (not for power storage) based on own implementation
-    # This adds additional hydrogen load with a constant profile
+    # Add constant additional hydrogen load (for non-power sector use given by REMIND)
     additional_hydrogen:
       enable: true
       # Type can either be
@@ -38,37 +37,49 @@ remind_coupling:
       # per_node: Add addditional hydrogen load to the existing hydrogen bus at each node, no spatial flexibility
       type: per_node  # Either "central_bus" or "per_node"
       buffer_max_hours: 168  # in hours, currently only applies to "central_bus"
-    # Electric vehicles based on default PyPSA-Eur implementation
-    EVs:
+    # Passenger electric vehicles based on PyPSA-Eur implementation
+    EV_pass:
       enable: false
-      bev_share: 0.6  # Share of EV electricity demand from cars
-      bev_annual_consumption: 3  # in MWh/year for cars, 3,000 kWh/year
-      bet_annual_consumption: 40  # in MWh/year, for trucks, 40,000 kWh/year
-      bev_charge_rate: 0.011  # in MW, for cars, 11 kW
-      bet_charge_rate: 0.15  # in MW, for trucks, 150 kW
-      bev_share_charger: 0.8  # Ratio of chargers for BEV
-      bet_share_charger: 0.1  # Ratio of chargers for BET
+      annual_consumption: 3  # in MWh/year, 3000 kWh/year
+      charge_rate: 0.011  # in MW, 11 kW
+      share_charger: 0.8  # Number of chargers per EV
       # Flexibility settings
       # Also see settings below (bev_dsm_restriction_value, bev_dsm_restriction_time)
       dsm: false
-      bev_energy: 0.06  # in MWh, for cars, 60 kWh, to estimate the store e_nom
-      bet_energy: 0.3  # in MWh, for trucks, 300 kWh, to estimate store e_nom
+      battery_size: 0.06  # in MWh, 60 kWh, to estimate the store e_nom
       dsm_availability: 0.5  # Share of EVs that can charge flexibly
-    # Heating based on PyPSA-Eur heat profile data, but simpler implementation
-    heating:
+    # Freight electric vehicles (work in progress)
+    EV_freight:
       enable: false
+      annual_consumption: 40
+      charge_rate: 0.15  # in MW, 150 kW
+      share_charger: 0.1  # Number of chargers per EV
       # Flexibility settings
       dsm: false
-      dsm_availability: 0.5  # Share of heating systems that can operate flexibly
+      battery_size: 0.3  # in MWh, 300 kWh
+      dsm_availability: 0.5  # Share of e-trucks that can charge flexibly
+    # Heat pumps based on simplified PyPSA-Eur implementation 
+    heat_pumps:
+      enable: false
+      avg_power: 0.002  # in MW_el, average heat pump
+      hours_used: 2000  # in hours
+      # Flexibility settings
+      dsm: false
       tank_delT: 40  # in °C, 40°C temperature difference
-      hp_tank_size: 200  # in litres, 200 litre store
-      hp_avg_power: 0.002  # in MW_el, average heat pump 6 kW_el, TODO: Include COP
-      hp_hours: 2000  # in h, used for 2000 hours
-      hp_tank_share: 0.9  # Share of heat pumps with tank storage
-      resistive_avg_power: 0.006  # in MW_el, average resistive heater 6 kW_el
-      resistive_hours: 500  # in h, used for 500 hours
-      resistive_tank_size: 200  # in litres, 200 litre store
-      resistive_tank_share: 0.1  # Share of resistive heaters with tank storage
+      tank_size: 200  # in litres
+      tank_share: 0.9  # Share of heat pumps with tank storage
+      dsm_availability: 0.5  # Share of heat pumps operating flexibly
+    # Resistive heating based on simplified PyPSA-Eur implementation
+    resistive:
+      enable: false
+      avg_power: 0.006  # in MW_el
+      hours_used: 500  # in hours
+      # Flexibility settings
+      dsm: false
+      tank_delT: 40  # in °C, 40°C temperature difference
+      tank_size: 200  # in litres
+      tank_share: 0.1  # Share of resistive heaters with tank storage
+      dsm_availability: 0.5  # Share of resistive heaters operating flexibly
   # Settings for the dispatch-only operations network
   solve_operations_network:
     enable: false
@@ -109,7 +120,7 @@ run:
     policy: true
     exclude: []
   shared_cutouts: true
-  use_shadow_directory: true # Set to false if problems regarding missing directories occur
+  use_shadow_directory: false # Set to false if problems regarding missing directories occur
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#foresight
 foresight: overnight
@@ -1048,7 +1059,7 @@ solving:
       fractional_last_unit_size: false
     keep_files: false
     model_kwargs:
-      solver_dir: "/tmp"
+      solver_dir: ""
 
   agg_p_nom_limits:
     agg_offwind: false

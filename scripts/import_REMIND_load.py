@@ -20,10 +20,10 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "import_REMIND_load",
-            scenario="TEST",
+            scenario="PyPSA_PkBudg1000_start2030_exportnewEVload_2025-07-09_13.38.18",
             iteration="1",
             year="2050",
-            # configfiles="resources/PyPSA_PkBudg1000_DEU_rm350_pypsa202504_EV_heatingExport_2025-06-20_14.49.59/i1/config.remind_scenario.yaml",
+            #configfiles="resources/PyPSA_PkBudg1000_start2025_newLoad_2025-07-07_11.29.49/i1/config.remind_scenario.yaml",
         )
 
     configure_logging(snakemake)
@@ -32,42 +32,67 @@ if __name__ == "__main__":
     # Load original load timeseries from PyPSA-EUR
     load = pd.read_csv(snakemake.input["load_timeseries"], index_col=0)
 
-    # Load REMIND sectoral load
+    def combine_sector(demand, source, target):
+        """Transfer value from one sector to another and drop the source."""
+        value = demand.loc[demand["sector"] == source, "value"].squeeze()
+        demand.loc[demand["sector"] == target, "value"] += value
+        demand = demand[demand["sector"] != source]
+        return demand
+
+    # Load demand data
     demand_sector = read_remind_data(
         snakemake.input["remind_data"],
-        "p32_load_sector",
-        rename_columns={"ttot": "year", "all_regi": "region", "loadPy32": "sector"},
+        "v32_load_sector",
+        rename_columns={
+            "ttot": "year",
+            "all_regi": "region",
+            "loadPy32": "sector",
+            "level": "value",
+        },
     ).query("year == @snakemake.wildcards.year")
-    demand_sector["value"] *= 1e6 * 8760  # Convert from TWa to MWh
+    # Convert TWa to MWh and assign units
+    demand_sector["value"] *= 1e6 * 8760
+    demand_sector["unit"] = "MWh_el"
+    demand_sector = demand_sector[["region", "sector", "unit", "value"]]
 
-    # Add sectoral loads to AC if sector coupling is not enabled
+    # Sector coupling settings
     sc_settings = snakemake.params["sector_coupling"]
 
-    if not sc_settings["EVs"]["enable"]:
-        demand_sector.loc[
-            demand_sector["sector"] == "AC", "value"
-        ] += demand_sector.loc[demand_sector["sector"] == "EVs", "value"].values[0]
-        demand_sector.query("sector != 'EVs'", inplace=True)
+    # Handle additional hydrogen demand
+    if not sc_settings["additional_hydrogen"]["enable"]:
+        demand_sector = combine_sector(demand_sector, "electrolysis", "AC")
+    else:
+        eta = read_remind_data(
+            snakemake.input["remind_data"],
+            "pm_eta_conv",
+            rename_columns={
+                "tall": "year",
+                "all_regi": "region",
+                "all_te": "technology",
+                "value": "eta",
+            },
+        ).query("year == @snakemake.wildcards.year & technology == 'elh2'")
+        h2_demand = demand_sector.query("sector == 'electrolysis'").merge(eta)
+        h2_demand["value"] *= h2_demand["eta"]
+        mask = demand_sector["sector"] == "electrolysis"
+        demand_sector.loc[mask, "value"] = h2_demand["value"].values[0]
+        demand_sector.loc[mask, "unit"] = "MWh_H2"
 
-    if not sc_settings["heating"]["enable"]:
-        demand_sector.loc[demand_sector["sector"] == "AC", "value"] += (
-            demand_sector.loc[demand_sector["sector"] == "heatpump", "value"]
-            + demand_sector.loc[demand_sector["sector"] == "resistive", "value"]
-        )
-        demand_sector.query(
-            "sector not in ['heatpump', 'resistive']",
-            inplace=True,
-        )
+    # Handle passenger EVs
+    if not sc_settings["EV_pass"]["enable"]:
+        demand_sector = combine_sector(demand_sector, "EV_pass", "AC")
+        
+    # Handle freight EVs
+    if not sc_settings["EV_freight"]["enable"]:
+        demand_sector = combine_sector(demand_sector, "EV_freight", "AC")
 
-    # If any sectoral load is negative set to zero and write warning mentioning the sector
-    if (demand_sector["value"] < 0).any():
-        negative_sectors = demand_sector.query("value < 0")["sector"].unique()
-        logger.warning(
-            f"Negative sectoral demand detected for sectors {negative_sectors}. "
-            "Setting negative values to zero."
-        )
-        # Set negative values to zero
-        demand_sector.loc[demand_sector["value"] < 0, "value"] = 0
+    # Handle heat pumps
+    if not sc_settings["heat_pumps"]["enable"]:
+        demand_sector = combine_sector(demand_sector, "heatpump", "AC")
+        
+    # Handle resistive heating
+    if not sc_settings["resistive"]["enable"]:
+        demand_sector = combine_sector(demand_sector, "resistive", "AC")
 
     # Save sectoral demand to CSV
     demand_sector.to_csv(snakemake.output["sectoral_load"])

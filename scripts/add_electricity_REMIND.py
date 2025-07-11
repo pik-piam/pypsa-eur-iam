@@ -1617,9 +1617,8 @@ def attach_hydrogen_demand_central_bus(
 
 def attach_hydrogen_demand_per_node(
     n,
-    year,
     config,
-    fp_remind_data,
+    fp_sectoral_load,
     fp_region_mapping,
 ):
     """
@@ -1633,6 +1632,9 @@ def attach_hydrogen_demand_per_node(
     hydrogen bus, link and store.
     """
 
+    h2_demand = pd.read_csv(fp_sectoral_load)
+    h2_demand = h2_demand[h2_demand["sector"] == "electrolysis"]
+
     # map countries to REMIND regions
     # Create region mapping
     region_mapping = get_region_mapping(
@@ -1642,20 +1644,7 @@ def attach_hydrogen_demand_per_node(
     region_mapping.columns = ["PyPSA-EUR", "REMIND-EU"]
     region_mapping = region_mapping.set_index("PyPSA-EUR")
 
-    # Load H2 demand from REMIND gdx file
-    h2_demand = read_remind_data(
-        fp_remind_data,
-        "p32_ElecH2Demand",
-        rename_columns={"ttot": "year", "all_regi": "region"},
-    )
-    h2_demand["value"] *= 8760 * 1e6  # convert TWa to MWh
-    # Restrict to relevant year and regions inside the model
-    h2_demand = h2_demand.loc[
-        (h2_demand["year"] == str(year))
-        & (h2_demand["region"].isin(region_mapping["REMIND-EU"].unique()))
-    ]
-
-    # Find all H2 buses which we connect to REMIND demand bus
+    # Find all H2 buses
     original_h2_buses = n.buses[n.buses["carrier"] == "H2"]
     original_h2_buses["country"] = original_h2_buses["location"].map(n.buses["country"])
     original_h2_buses["region"] = original_h2_buses["country"].map(
@@ -1697,119 +1686,112 @@ def attach_hydrogen_demand_per_node(
 
 # Function modified from prepare_sector_network.py
 # TODO: Adjust for multiple regions
-def add_EVs_REMIND(n, options_ev):
+def attach_EV_REMIND(
+    n: pypsa.Network,
+    options_ev: dict,
+    fp_sectoral_load: str,
+    fp_transport_demand: str,
+    fp_transport_data: str,
+    fp_avail_profile: str,
+    fp_dsm_profile: str,
+    type: str,
+):
+    # Check type
+    if type not in ("pass", "freight"):
+        raise ValueError("mode must be 'pass' or 'freight'")
+
+    # Get nodes
+    spatial_nodes = n.buses.query("carrier == 'AC'").index
 
     # Read in electricity demand for EVs
-    ev_load = pd.read_csv(snakemake.input.sectoral_load)
-    ev_load = ev_load[ev_load["sector"] == "EVs"]
+    ev_load = pd.read_csv(fp_sectoral_load)
+    ev_load = ev_load[ev_load["sector"] == "EV_" + type]
 
     # Read in transport demand in units driven km [100 km]
-    transport = pd.read_csv(
-        snakemake.input.transport_demand, index_col=0, parse_dates=True
-    )
+    transport = pd.read_csv(fp_transport_demand, index_col=0, parse_dates=True)
 
     # Normalise such that the sum corresponds to the total EV electricity demand (in MWh)
     load_p_set = transport.div(transport.sum(axis=0).sum()) * ev_load["value"].values[0]
 
     # Estimate number of cars from EV load given assumptions in settings
     # TODO: Get this from EDGE-T
-    number_bev = (
-        ev_load["value"]
-        * options_ev["bev_share"]
-        / options_ev["bev_annual_consumption"]
-    )
-    number_bet = (
-        ev_load["value"]
-        * (1 - options_ev["bev_share"])
-        / options_ev["bet_annual_consumption"]
-    )
+    number_evs = ev_load["value"] / options_ev["annual_consumption"]
 
     # Read in transport data (for distribution of cars to nodes)
-    transport_data = pd.read_csv(snakemake.input.transport_data, index_col=0)
+    transport_data = pd.read_csv(fp_transport_data, index_col=0)
     number_cars = transport_data["number cars"]
-    # Distribute number of cars to spatial nodes using number of cars
-    number_bev = (number_cars * number_bev[0]) / number_cars.sum()
-    number_bet = (number_cars * number_bet[0]) / number_cars.sum()
+    # Distribute number of cars to spatial nodes
+    number_evs = (number_cars * number_evs.values[0]) / number_cars.sum()
 
     # Estimate simultaneous charging power in MW (used for link)
-    charge_power = (
-        number_bev * options_ev["bev_charge_rate"] * options_ev["bev_share_charger"]
-        + number_bet * options_ev["bet_charge_rate"] * options_ev["bet_share_charger"]
-    )
+    charge_power = number_evs * options_ev["charge_rate"] * options_ev["share_charger"]
     link_p_nom = charge_power * options_ev["dsm_availability"]
 
     # Estimate total battery pack capacity in MWh (used for store)
-    battery_energy = (
-        number_bev * options_ev["bev_energy"] + number_bet * options_ev["bet_energy"]
-    )
+    battery_energy = number_evs * options_ev["battery_size"]
     store_e_nom = battery_energy * options_ev["dsm_availability"]
 
     # Read in availability profile for charging
-    link_avail_profile = pd.read_csv(
-        snakemake.input.avail_profile, index_col=0, parse_dates=True
-    )
+    link_avail_profile = pd.read_csv(fp_avail_profile, index_col=0, parse_dates=True)
 
     # Read in DSM profile
-    store_dsm_profile = pd.read_csv(
-        snakemake.input.dsm_profile, index_col=0, parse_dates=True
-    )
+    store_dsm_profile = pd.read_csv(fp_dsm_profile, index_col=0, parse_dates=True)
 
-    n.add("Carrier", "EV battery")
+    carrier_name = "EV {type} battery".format(type=type)
+
+    ev_nodes = spatial_nodes + " " + carrier_name
+
+    n.add("Carrier", carrier_name)
 
     n.add(
         "Bus",
-        spatial_nodes,
-        suffix=" EV battery",
+        ev_nodes,
         location=spatial_nodes,
-        carrier="EV battery",
+        carrier=carrier_name,
         unit="MWh_el",
     )
-
-    # p_set = (
-    #     load_p_set + cycling_shift(load_p_set, 2) + cycling_shift(load_p_set, 4)
-    # )
 
     # If DSM is enabled don't shift the load profile
     if options_ev["dsm"]:
         p_set = load_p_set
-    # If DSM is not enabled, shift the load profile to create a sensible
-    # charging profile with a slight mid-day peak and a more pronounced evening peak
+    # If DSM is not enabled, shift the load profile to mimic a charging profile
     else:
         p_set = (
-            cycling_shift(load_p_set, 1)
-            + cycling_shift(load_p_set, 2)
-            + cycling_shift(load_p_set, 3)
+            load_p_set + cycling_shift(load_p_set, 1) + cycling_shift(load_p_set, 2)
         ) / 3
 
+    # Add load
     n.add(
         "Load",
         spatial_nodes,
-        suffix=" land transport EV",
-        bus=spatial_nodes + " EV battery",
-        carrier="land transport EV",
+        suffix=" land transport EV {type}".format(type=type),
+        bus=ev_nodes,
+        carrier="land transport EV {type}".format(type=type),
         p_set=p_set.loc[n.snapshots, spatial_nodes],
     )
 
+    # Add charger
     n.add(
         "Link",
         spatial_nodes,
-        suffix=" BEV charger",
+        suffix=" BEV {type} charger".format(type=type),
         bus0=spatial_nodes,
-        bus1=spatial_nodes + " EV battery",
+        bus1=ev_nodes,
         p_nom=link_p_nom,
-        carrier="BEV charger",
+        carrier="BEV {type} charger".format(type=type),
         p_max_pu=link_avail_profile.loc[n.snapshots, spatial_nodes],
         efficiency=1,
     )
 
+    # Add battery storage for EVs
     if options_ev["dsm"]:
 
         n.add(
             "Store",
             spatial_nodes,
-            suffix=" EV battery",
-            bus=spatial_nodes + " EV battery",
-            carrier="EV battery",
+            suffix= " " + carrier_name,
+            bus=ev_nodes,
+            carrier=carrier_name,
             e_cyclic=True,
             e_nom=store_e_nom,
             e_max_pu=1,
@@ -1828,169 +1810,134 @@ def cycling_shift(df, steps=1):
 
 
 # TODO: Adjust for multiple regions
-def add_heat_REMIND(
+def attach_heat_REMIND(
     n: pypsa.Network,
-    cop_profiles_file: str,
-    hourly_heat_demand_total_file: str,
-    hourly_water_heat_demand_total_file: str,
-    # REMIND file with share of water heating in relation to total heat demand
-    wh_share_file: str,
+    fp_wh_share: str,
+    fp_sectoral_load: str,
+    fp_hourly_heat_demand_total: str,
+    fp_hourly_water_heat_demand_total: str,
     options_heat: dict,
+    type: str,
+    fp_cop_profiles=None,
 ):
     """
     Add simple heat sector to the network, using rescaled heat load of PyPSA-Eur.
-    This is based on the electricity demand for
-    (i) heat pumps, and (ii) resistive heating from REMIND.
-
+    For heat pumps, this takes the time-dependent COP into account before rescaling the
+    load to match the REMIND values.
+    For resistive heating, the load is simply rescaled to match the REMIND values.
+    Total heat demand is split into space heating and water heating
+    based on the share from REMIND.
     """
-    logger.info("Add heat sector")
+    # Check type
+    if type not in ("heatpump", "resistive"):
+        raise ValueError("mode must be 'heatpump' or 'resistive'")
+
+    # Get nodes
+    spatial_nodes = n.buses.query("carrier == 'AC'").index
 
     # Get share of water heating in relation to total heat demand
     year = int(snakemake.wildcards.year)
     # If year > 2100, use 2100 as the year for the share
     year = 2100 if year > 2100 else year
-    wh_share = pd.read_csv(wh_share_file, index_col=0)
-    wh_share = wh_share[wh_share['year'] == year]
+    wh_share = pd.read_csv(fp_wh_share, index_col=0)
+    wh_share = wh_share[wh_share["year"] == year]
+    # If type is heatpump filter for item = "heat pumps"
+    if type == "heatpump":
+        wh_share = wh_share[wh_share["item"].isin(["heat pumps"])]
+    elif type == "resistive":
+        wh_share = wh_share[wh_share["item"].isin(["resistive heating"])]
 
-    # Get electricity for heat pumps from REMIND
-    elec_hp_REMIND = pd.read_csv(snakemake.input.sectoral_load).query(
-        "sector == 'heatpump'"
-    ).value.values[0]
-    
-    # Get electricity for resistive heating from REMIND
-    elec_resistive_REMIND = pd.read_csv(snakemake.input.sectoral_load).query(
-        "sector == 'resistive'"
-    ).value.values[0]
-    
+    # Get electricity demand from REMIND
+    elec_REMIND = (
+        pd.read_csv(fp_sectoral_load)
+        .query("sector == '{type}'".format(type=type))
+        .value.values[0]
+    )
+
     # Calculate share for water heating and space heating
-    elec_hp_space_REMIND = (
-        elec_hp_REMIND * (1 - wh_share.loc[wh_share["item"] == "heat pumps", "value"])
-    )
-    elec_hp_water_REMIND = (
-        elec_hp_REMIND * wh_share.loc[wh_share["item"] == "heat pumps", "value"]
-    )
-    elec_resistive_space_REMIND = (
-        elec_resistive_REMIND * (1 - wh_share.loc[wh_share["item"] == "resistive heating", "value"])
-    )
-    elec_resistive_water_REMIND = (
-        elec_resistive_REMIND * wh_share.loc[wh_share["item"] == "resistive heating", "value"]
-    )
-    
+    elec_water_REMIND = elec_REMIND * wh_share.value.values[0]
+    elec_space_REMIND = elec_REMIND * (1 - wh_share.value.values[0])
+
     # Get space heating profile of residential and services
-    heat_demand_total = (
-        xr.open_dataset(hourly_heat_demand_total_file).to_dataframe().unstack(level=1)
+    # This profile has both a diurnal and a seasonal cycle
+    space_heat_profile = (
+        xr.open_dataset(fp_hourly_heat_demand_total).to_dataframe().unstack(level=1)
     )
-    heat_demand = (
-        heat_demand_total["residential space"] + heat_demand_total["services space"]
+    space_heat_profile = (
+        space_heat_profile["residential space"] + space_heat_profile["services space"]
     )
-    
+
     # Get heat profile from BDEW, use this as the water heating
-    water_heat_demand_total = (
-        xr.open_dataset(hourly_water_heat_demand_total_file).to_dataframe()
+    # This profile only has a diurnal cycle
+    water_heat_profile = (
+        xr.open_dataset(fp_hourly_water_heat_demand_total).to_dataframe()
     )
 
-    # Get cop profile for heat pumps and select any profile
-    cop = xr.open_dataarray(cop_profiles_file)
-    cop = (
-        cop.sel(heat_system="rural", heat_source="air")
-        .to_pandas()
-        .reindex(index=n.snapshots)
+    # If adding heat pumps, divide both profiles by COP, match to REMIND only later
+    if type == "heatpump":
+        cop = xr.open_dataarray(fp_cop_profiles)
+        cop = (
+            cop.sel(heat_system="rural", heat_source="air")
+            .to_pandas()
+            .reindex(index=n.snapshots)
+        )
+        space_heat_profile = space_heat_profile / cop
+        water_heat_profile = water_heat_profile / cop
+    # If adding resistive heating, use the REMIND values directly
+    elif type == "resistive":
+        elec_space_REMIND = elec_space_REMIND
+        elec_water_REMIND = elec_water_REMIND
+        
+    # Rescale profiles to match REMIND values
+    space_heat_profile = (
+        space_heat_profile
+        * (elec_space_REMIND / space_heat_profile.sum().sum())
     )
-
-    # Heat pumps: Get electricity demand profile by dividing by COP and rescale to match REMIND values
-    elec_hp_space_profile = heat_demand / cop
-    elec_hp_space_profile = (
-        elec_hp_space_profile * (elec_hp_space_REMIND / elec_hp_space_profile.sum().sum()).values[0]
-    )
-    elec_hp_water_profile = water_heat_demand_total / cop
-    elec_hp_water_profile = (
-        elec_hp_water_profile
-        * (elec_hp_water_REMIND / elec_hp_water_profile.sum().sum()).values[0]
-    )
-    # Combine space and water heating profiles
-    elec_hp_profile_total = (
-        elec_hp_space_profile + elec_hp_water_profile
+    water_heat_profile = (
+        water_heat_profile
+        * (elec_water_REMIND / water_heat_profile.sum().sum())
     )
     
-    # Resistive heating: Rescale to match REMIND values
-    elec_resistive_space_profile = (
-        heat_demand * (elec_resistive_space_REMIND / heat_demand.sum().sum()).values[0]
-    )
-    elec_resistive_water_profile = (
-        water_heat_demand_total * (elec_resistive_water_REMIND / water_heat_demand_total.sum().sum()).values[0]
-    )
     # Combine space and water heating profiles
-    elec_resistive_profile_total = (
-        elec_resistive_space_profile + elec_resistive_water_profile
-    )
+    total_heat_profile = space_heat_profile + water_heat_profile
 
-    # Add carriers
-    n.add("Carrier", "heat pump electricity")
-    n.add("Carrier", "resistive heating electricity")
+    # Add carrier
+    carrier_name = "{type} electricity".format(type=type)
+    heat_nodes = spatial_nodes + " " + carrier_name
+    
+    n.add("Carrier", carrier_name)
 
     # Add buses
     spatial_nodes = n.buses.query("carrier == 'AC'").index
     n.add(
         "Bus",
-        spatial_nodes,
-        suffix=" heat pump electricity",
+        heat_nodes,
         location=spatial_nodes,
-        carrier="heat pump electricity",
+        carrier=carrier_name,
         unit="MWh_el",
-    )
-    n.add(
-        "Bus",
-        spatial_nodes,
-        suffix=" resistive heating electricity",
-        location=spatial_nodes,
-        carrier="resistive heating electricity",
-        unit="MWh_el",
-    )
+    )    
 
-    # Add loads
+    # Add load
     n.add(
         "Load",
         spatial_nodes,
-        suffix=" heat pump electricity",
-        bus=spatial_nodes + " heat pump electricity",
-        carrier="heat pump electricity",
-        p_set=elec_hp_profile_total.loc[n.snapshots],
-    )
-    n.add(
-        "Load",
-        spatial_nodes,
-        suffix=" resistive heating electricity",
-        bus=spatial_nodes + " resistive heating electricity",
-        carrier="resistive heating electricity",
-        p_set=elec_resistive_profile_total.loc[n.snapshots],
+        suffix=" {type} electricity".format(type=type),
+        bus=heat_nodes,
+        carrier=carrier_name,
+        p_set=total_heat_profile.loc[n.snapshots],
     )
 
     # Add links
     n.add(
         "Link",
         spatial_nodes,
-        carrier="heat pump",
+        carrier="{type}".format(type=type),
         # This link is not an actual heat pump, but only a link from the electricity bus
-        suffix=" heat pump",
+        suffix=" {type}".format(type=type),
         bus0=spatial_nodes,
-        bus1=spatial_nodes + " heat pump electricity",
+        bus1=heat_nodes,
         # No need to make extendable, just allow max throughput
-        p_nom=elec_hp_profile_total.loc[n.snapshots].sum(axis=1).max(),
-        p_nom_extendable=False,
-        efficiency=1,
-        p_min_pu=0,  # Unidirectional link
-        p_max_pu=1,
-    )
-    n.add(
-        "Link",
-        spatial_nodes,
-        carrier="resistive heating",
-        # This link is not an actual resistive heating, but only a link from the electricity bus
-        suffix=" resistive heating",
-        bus0=spatial_nodes,
-        bus1=spatial_nodes + " resistive heating electricity",
-        # No need to make extendable, just allow max throughput
-        p_nom=elec_resistive_profile_total.loc[n.snapshots].sum(axis=1).max(),
+        p_nom=total_heat_profile.loc[n.snapshots].max(),
         p_nom_extendable=False,
         efficiency=1,
         p_min_pu=0,  # Unidirectional link
@@ -1999,78 +1946,49 @@ def add_heat_REMIND(
 
     # Add store if configured
     if options_heat["dsm"]:
-        # Estimate number of heat pumps
-        number_hp = (
-            elec_hp_REMIND
-            / options_heat["hp_avg_power"]
-            / options_heat["hp_hours"]
+        
+        # Estimate number of heating units
+        number_units = (
+            elec_REMIND / options_heat["avg_power"] / options_heat["hours_used"]
         )
         # Estimate total thermal storage size in MWh
         spec_heat_cap_water = 4.18  # kJ per kg*K
         kj2mwh = 1 / 3.6e6
-        thermal_storage_hp = (
-            number_hp
-            * options_heat["hp_tank_size"]
-            * options_heat["hp_tank_share"]
+        thermal_storage = (
+            number_units
+            * options_heat["tank_size"]
+            * options_heat["tank_share"]
             * spec_heat_cap_water
             * options_heat["tank_delT"]
             * kj2mwh
         )
         # Distribute total thermal storage to spatial nodes by using heat_demand
-        thermal_storage_hp_spatial = (
-            heat_demand.sum() * thermal_storage_hp
-        ) / heat_demand.sum().sum()
-
-        # Calculate corresponding electricity storage size in MWh given time-dependent COP
-        elec_storage_hp_spatial = thermal_storage_hp_spatial / cop
+        thermal_storage_spatial = (
+            space_heat_profile.sum(axis=0) * thermal_storage
+        ) / space_heat_profile.sum().sum()
         
-        # Size of store is the maximum
-        elec_storage_hp_max = elec_storage_hp_spatial.max()
-        
-        # Estimate number of resistive heaters
-        number_resistive = (
-            elec_resistive_REMIND
-            / options_heat["resistive_avg_power"]
-            / options_heat["resistive_hours"]
-        )
-        
-        # Estimate total thermal storage size in MWh
-        thermal_storage_resistive = (
-            number_resistive
-            * options_heat["resistive_tank_size"]
-            * options_heat["resistive_tank_share"]
-            * spec_heat_cap_water
-            * options_heat["tank_delT"]
-            * kj2mwh
-        )
-        # Distribute total thermal storage to spatial nodes by using heat_demand
-        thermal_storage_resistive_spatial = (
-            heat_demand.sum() * thermal_storage_resistive
-        ) / heat_demand.sum().sum()
-        
+        # If using heat pumps, calculate corresponding electricity storage size in MWh
+        # given time-dependent COP
+        if type == "heatpump":
+            # Calculate thermal storage size in MWh given time-dependent COP
+            elec_storage_spatial = thermal_storage_spatial / cop
+            size_store = elec_storage_spatial.max()
+            max_pu_store = elec_storage_spatial / size_store
+        elif type == "resistive":
+            # If using resistive heating, use the thermal storage directly
+            size_store = thermal_storage_spatial
+            max_pu_store = 1  # No time-dependent COP, so just use 1
+            
         n.add(
             "Store",
             spatial_nodes,
-            suffix=" heat pump storage",
-            bus=spatial_nodes + " heat pump electricity",
-            carrier="heat pump storage",
+            suffix=" {type} storage".format(type=type),
+            bus=heat_nodes,
+            carrier="{type} storage".format(type=type),
             e_cyclic=True,
-            e_nom=elec_storage_hp_max,
+            e_nom=size_store * options_heat["dsm_availability"],
             e_nom_extendable=False,
-            e_max_pu=(elec_storage_hp_spatial / elec_storage_hp_max),
-            e_min_pu=0,
-        )
-        
-        n.add(
-            "Store",
-            spatial_nodes,
-            suffix=" resistive heating storage",
-            bus=spatial_nodes + " resistive heating electricity",
-            carrier="resistive heating storage",
-            e_cyclic=True,
-            e_nom=thermal_storage_resistive_spatial,
-            e_nom_extendable=False,
-            e_max_pu=1,
+            e_max_pu=max_pu_store,
             e_min_pu=0,
         )
 
@@ -2082,10 +2000,11 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "add_electricity_REMIND",
-            scenario="testflex",
-            iteration="20",
+            scenario="PyPSA_PkBudg1000_start2030_exportnewEVload_2025-07-09_13.38.18",
+            iteration="1",
             year="2050",
             clusters=4,
+            configfiles="resources/PyPSA_PkBudg1000_start2030_exportnewEVload_2025-07-09_13.38.18/i1/config.remind_scenario.yaml"
         )
     configure_logging(snakemake)
     set_scenario_config(snakemake)
@@ -2274,25 +2193,60 @@ if __name__ == "__main__":
             attach_hydrogen_demand_per_node(
                 n,
                 config=snakemake.params["sector_coupling"]["additional_hydrogen"],
-                year=snakemake.wildcards["year"],
                 fp_region_mapping=snakemake.input["region_mapping"],
-                fp_remind_data=snakemake.input["remind_data"],
+                fp_sectoral_load=snakemake.input["sectoral_load"],
             )
 
-    # Attach EVs
-    if sc_settings["EVs"]["enable"]:
-        spatial_nodes = n.buses.query("carrier == 'AC'").index  # TODO: Move
-        add_EVs_REMIND(n, sc_settings["EVs"])
-
-    # Attach heating
-    if sc_settings["heating"]["enable"]:
-        add_heat_REMIND(
+    # Attach passenger EVs
+    if sc_settings["EV_pass"]["enable"]:
+        attach_EV_REMIND(
             n,
-            cop_profiles_file=snakemake.input.cop_profiles,
-            hourly_heat_demand_total_file=snakemake.input.hourly_heat_demand_total,
-            hourly_water_heat_demand_total_file=snakemake.input.hourly_water_heat_demand_total,
-            wh_share_file=snakemake.input.wh_share,
-            options_heat=sc_settings["heating"],
+            options_ev=sc_settings["EV_pass"],
+            fp_sectoral_load=snakemake.input.sectoral_load,
+            fp_transport_demand=snakemake.input.transport_demand,
+            fp_transport_data=snakemake.input.transport_data,
+            fp_avail_profile=snakemake.input.avail_profile,
+            fp_dsm_profile=snakemake.input.dsm_profile,
+            type="pass",
+        )
+
+    # Attach freight EVs
+    if sc_settings["EV_freight"]["enable"]:
+        attach_EV_REMIND(
+            n,
+            options_ev=sc_settings["EV_freight"],
+            fp_sectoral_load=snakemake.input.sectoral_load,
+            # TODO: Change profiles
+            fp_transport_demand=snakemake.input.transport_demand,
+            fp_transport_data=snakemake.input.transport_data,
+            fp_avail_profile=snakemake.input.avail_profile,
+            fp_dsm_profile=snakemake.input.dsm_profile,
+            type="freight",
+        )
+
+    # Attach heat pumps
+    if sc_settings["heat_pumps"]["enable"]:
+        attach_heat_REMIND(
+            n,
+            fp_wh_share=snakemake.input.wh_share,
+            fp_sectoral_load=snakemake.input.sectoral_load,
+            fp_hourly_heat_demand_total=snakemake.input.hourly_heat_demand_total,
+            fp_hourly_water_heat_demand_total=snakemake.input.hourly_water_heat_demand_total,
+            fp_cop_profiles=snakemake.input.cop_profiles,            
+            options_heat=sc_settings["heat_pumps"],
+            type="heatpump",
+        )
+        
+    # Attach resistive heating
+    if sc_settings["resistive"]["enable"]:
+        attach_heat_REMIND(
+            n,
+            fp_wh_share=snakemake.input.wh_share,
+            fp_sectoral_load=snakemake.input.sectoral_load,
+            fp_hourly_heat_demand_total=snakemake.input.hourly_heat_demand_total,
+            fp_hourly_water_heat_demand_total=snakemake.input.hourly_water_heat_demand_total,
+            options_heat=sc_settings["resistive"],
+            type="resistive",
         )
 
     sanitize_carriers(n, snakemake.config)
@@ -2301,3 +2255,5 @@ if __name__ == "__main__":
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])
+
+# %%
