@@ -558,7 +558,7 @@ def calculate_peak_residual_loads(n, grouper, kind):
             bus_carrier=[
                 "AC",
                 "EV pass battery",
-                "EV fright battery",
+                "EV freight battery",
                 "heatpump electricity",
                 "resistive electricity",
             ],
