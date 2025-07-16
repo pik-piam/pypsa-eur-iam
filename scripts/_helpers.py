@@ -11,9 +11,7 @@ import os
 import re
 import time
 from functools import partial, wraps
-from os.path import exists
 from pathlib import Path
-from shutil import copyfile
 from tempfile import NamedTemporaryFile
 from typing import Callable, Union
 
@@ -38,19 +36,10 @@ logger = logging.getLogger(__name__)
 
 REGION_COLS = ["geometry", "name", "x", "y", "country"]
 
+PYPSA_V1 = bool(re.match(r"^0\.35\.\d\.post1\.dev\d{3}", pypsa.__version__))
+
 DEFAULT_TUNNEL_PORT = 1080
 LOGIN_NODE = "01"
-
-def copy_default_files(workflow):
-    default_files = {
-        "config/config.default.yaml": "config/config.yaml",
-        "config/scenarios.template.yaml": "config/scenarios.yaml",
-    }
-    for template, target in default_files.items():
-        target = os.path.join(workflow.current_basedir, target)
-        template = os.path.join(workflow.current_basedir, template)
-        if not exists(target) and exists(template):
-            copyfile(template, target)
 
 
 def get_scenarios(run):
@@ -135,6 +124,7 @@ def get_run_path(fn, dir, rdir, shared_resources, exclude_from_shared):
             "cluster_network_base_s_{clusters}",
             "profile_{clusters}_",
             "build_renewable_profile_{clusters}",
+            "regions_by_class_{clusters}",
             "availability_matrix_",
             "determine_availability_matrix_",
             "solar_thermal",

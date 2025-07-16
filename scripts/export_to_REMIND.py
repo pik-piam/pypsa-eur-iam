@@ -324,6 +324,38 @@ def weigh_by_REMIND_capacity(df, grouper, year):
     return df[["region", "carrier", "value"]]
 
 
+def get_total_load(n):
+    """
+    Get the total electricity load for the network,
+    taking into account that hydrogen load needs to
+    be divided by the efficiency of the electrolysis. 
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network to get the total load for.
+
+    Returns
+    -------
+    float
+        Total load for the network.
+    """
+    # Get the total load for the network
+    load_sector = n.statistics.withdrawal(comps="Load", nice_names=False)
+
+    # Get the efficiency of the electrolysis
+    if "H2 electrolysis" in n.links.carrier.values and "H2" in load_sector.index:
+        efficiency = n.links.loc[
+            n.links.carrier == "H2 electrolysis", "efficiency"
+        ].values[0]
+        # Divide hydrogen load by efficiency
+        load_sector["H2"] /= efficiency
+    
+    total_load = load_sector.sum()
+    
+    return total_load
+    
+
 # ------------------------------
 # Coupling functions
 # ------------------------------
@@ -508,6 +540,7 @@ def calculate_markups_demand(n, grouper, z_cutoff, map_to_remind):
 
     # Get average electricity price
     load_prices = calculate_electricity_prices(n, z_cutoff)
+    load_prices = load_prices.query("value != 0").reset_index(drop=True)
     load_price_avg = load_prices.query("general_carrier == 'total'").value.values[0]
 
     # Calculate markups for the demand side
@@ -520,7 +553,7 @@ def calculate_markups_demand(n, grouper, z_cutoff, map_to_remind):
     # If NA set to 0
     markups_demand["value"] = markups_demand["value"].fillna(0)
 
-    return process_data(markups_demand, cols=grouper, map_to_remind=map_to_remind)
+    return markups_demand
 
 
 def calculate_peak_residual_loads(n, grouper, kind):
@@ -545,7 +578,6 @@ def calculate_peak_residual_loads(n, grouper, kind):
     n.generators.loc[n.generators.index.str.contains("load"), "peak_residual_load"] = (
         "No"
     )
-    n.loads["peak_residual_load"] = "Load"
     # Don't include hydrogen turbines and batteries into peak residual load calculation
     n.stores["peak_residual_load"] = "No"
     # Don't include hydro and pumped hydro into peak residual load calculation (no PHS in REMIND)
@@ -553,21 +585,18 @@ def calculate_peak_residual_loads(n, grouper, kind):
 
     residual_load = (
         n.statistics.energy_balance(
-            comps=["Generator", "Store", "StorageUnit", "Load"],
+            comps=["Generator", "Store", "StorageUnit"],
             # Add all carriers to which electricity loads are attached
-            bus_carrier=[
-                "AC",
-                "EV pass battery",
-                "EV fright battery",
-                "heatpump electricity",
-                "resistive electricity",
-            ],
+            bus_carrier="AC",
             groupby=[grouper, "peak_residual_load"],
             aggregate_time=False,
         )
         .groupby([grouper, "peak_residual_load"])
         .sum()
     )
+
+    total_load = get_total_load(n)
+    avg_load = total_load / 8760
 
     # Helper function to be used with groupby
     def get_absolute_and_relative_prl(x):
@@ -586,9 +615,7 @@ def calculate_peak_residual_loads(n, grouper, kind):
                     x.xs("Yes", level="peak_residual_load")[max_prl_snapshot]
                     .iloc[0]
                     .item()
-                    / (
-                        -1 * x.xs("Load", level="peak_residual_load").mean(axis=1)
-                    ).item()
+                    / avg_load
                 ),
             }
         )
@@ -723,6 +750,7 @@ def calculate_optimal_capacities(n, comps, grouper, weigh_by_remind, year=None):
     return optimal_capacities
 
 
+# TODO: Adjust to multiple regions
 def calculate_grid_losses(n, grouper="region", kind="relative"):
     """
     Calculate grid losses for the network.
@@ -741,16 +769,9 @@ def calculate_grid_losses(n, grouper="region", kind="relative"):
         regions = n.buses["region"].unique()
         grid_loss_abs = pd.Series(0, index=regions, name="absolute")
         grid_loss_abs.index.name = "region"
-    grid_loss_rel = grid_loss_abs / n.statistics.withdrawal(
-        comps="Load",
-        bus_carrier=[
-            "AC",
-            "EV pass battery",
-            "heatpump electricity",
-            "resistive electricity",
-        ],
-        groupby=grouper,
-    )
+    
+    total_load = get_total_load(n)
+    grid_loss_rel = grid_loss_abs / total_load
 
     grid_loss = pd.DataFrame(
         {"absolute": grid_loss_abs, "relative": grid_loss_rel}
@@ -809,17 +830,8 @@ def calculate_link_generation(n, carrier, grouper, kind="relative"):
     absolute_supply = get_supply_with_zeros(n, carrier=carrier, component="Link")
 
     # Calculate relative supply
-    relative_supply = absolute_supply / n.statistics.withdrawal(
-        comps="Load",
-        bus_carrier=[
-            "AC",
-            "EV pass battery",
-            "EV freight battery",
-            "heatpump electricity",
-            "resistive electricity",
-        ],
-        groupby=grouper,
-    )
+    total_load = get_total_load(n)
+    relative_supply = absolute_supply / total_load
 
     # Combine absolute and relative supply into a DataFrame
     link_generation = (
@@ -1204,14 +1216,14 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "export_to_REMIND",
-            configfiles="resources/PyPSA_PkBudg1000_start2030_fixRelShare_noFlex_2025-07-11_11.56.38/i1/config.remind_scenario.yaml",
+            configfiles="resources/TEST/i1/config.remind_scenario.yaml",
             iteration="1",
-            scenario="PyPSA_PkBudg1000_start2030_fixRelShare_noFlex_2025-07-11_11.56.38",
+            scenario="TEST",
         )
 
         # Manual input for testing
         fp_networks = [
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_1H-Ep137.1.nc",
+            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_1H-Ep649.5.nc",
             # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
         ]
         fp_triggers_op = [
