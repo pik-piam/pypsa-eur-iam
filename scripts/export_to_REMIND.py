@@ -476,6 +476,29 @@ def calculate_electricity_prices(n, z_cutoff, hourly=False):
     return avg_prices
 
 
+def calculate_average_electricity_price(n, z_cutoff):
+    """
+    Calculate average electricity price for the network.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network to calculate average electricity price for.
+    grouper : list
+        List of columns to group the average electricity price by.
+    year: int
+        Year to calculate the average electricity price for.
+    map_to_remind: bool
+        Whether to map the general carrier names to REMIND carrier names.
+    """
+    load_prices = calculate_electricity_prices(n, z_cutoff=z_cutoff)
+
+    avg_price = load_prices.query("general_carrier == 'total'")
+    avg_price = avg_price.drop(columns=["general_carrier"])
+
+    return avg_price
+
+
 def calculate_markups_supply(n, comps, grouper, z_cutoff, map_to_remind):
     """
     Calculate markups for all generators.
@@ -520,6 +543,42 @@ def calculate_markups_supply(n, comps, grouper, z_cutoff, map_to_remind):
     return process_data(markups_supply, cols=grouper, map_to_remind=map_to_remind)
 
 
+def calculate_market_values_supply_REMIND(n, comps, grouper, z_cutoff, map_to_remind):
+    """
+    Calculate market values for the supply side, i.e.
+    electricity prices received by generators.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network to calculate market values for.
+    grouper : list
+        List of columns to group the market values by.
+    z_cutoff: float or bool
+        Z-score above which to cut off scarcity prices.
+    map_to_remind: bool
+        Whether to map the general carrier names to REMIND carrier names.
+    """
+
+    # Cutoff scarcity prices if configured
+    n_calc = cutoff_scarcity_prices(n, z_cutoff) if z_cutoff else n
+
+    # Calculate markups for the supply side
+    market_value = n_calc.statistics.market_value(comps=comps, groupby=grouper)
+
+    # If NA set to 0
+    market_value = market_value.fillna(0)
+
+    market_value = (
+        market_value.to_frame("value")
+        .reset_index()
+        .drop(columns=["component"])
+        .fillna(0)
+    )
+
+    return process_data(market_value, cols=grouper, map_to_remind=map_to_remind)
+
+
 # TODO: Make compatible with multiple regions
 def calculate_markups_demand(n, grouper, z_cutoff, map_to_remind):
     """
@@ -541,7 +600,6 @@ def calculate_markups_demand(n, grouper, z_cutoff, map_to_remind):
     # Get average electricity price
     load_prices = calculate_electricity_prices(n, z_cutoff)
     load_prices = load_prices.query("value != 0").reset_index(drop=True)
-    load_prices = load_prices.query("value != 0").reset_index(drop=True)
     load_price_avg = load_prices.query("general_carrier == 'total'").value.values[0]
 
     # Calculate markups for the demand side
@@ -555,6 +613,34 @@ def calculate_markups_demand(n, grouper, z_cutoff, map_to_remind):
     markups_demand["value"] = markups_demand["value"].fillna(0)
 
     return markups_demand
+
+
+def calculate_sectoral_electricity_prices_REMIND(n, grouper, z_cutoff, map_to_remind):
+    """
+    Calculate electricity prices paid by different end-users
+    for passing to REMIND (e.g. remove total).
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network to calculate market values for.
+    grouper : list
+        List of columns to group the market values by.
+    z_cutoff: float or bool
+        Z-score above which to cut off scarcity prices.
+    map_to_remind: bool
+        Whether to map the general carrier names to REMIND carrier names.
+    """
+
+    # Get average electricity price
+    load_prices = calculate_electricity_prices(n, z_cutoff)
+    load_prices = load_prices.query("value != 0").reset_index(drop=True)
+    load_prices = load_prices.query("general_carrier != 'total'").reset_index(drop=True)
+
+    # If NA remove
+    load_prices = load_prices.dropna(subset=["value"])
+
+    return load_prices
 
 
 def calculate_peak_residual_loads(n, grouper, kind):
@@ -1177,15 +1263,15 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "export_to_REMIND",
-            configfiles="resources/PyPSA_PkBudg1000_start2025_rm351_py202507_2025-07-16_12.59.19/i1/config.remind_scenario.yaml",
-            iteration="1",
-            scenario="PyPSA_PkBudg1000_start2025_rm351_py202507_2025-07-16_12.59.19",
+            configfiles="resources/PyPSA_KN2045_start2030_noDemandMarkup_noFlex_2025-07-16_23.30.57/i20/config.remind_scenario.yaml",
+            iteration="20",
+            scenario="TEST",
         )
 
         # Manual input for testing
         fp_networks = [
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_3H-Ep286.0.nc",
-            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2055/networks/base_s_4_elec_3H-Ep328.2.nc",
+            f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2050/networks/base_s_4_elec_3H-Ep861.6.nc",
+            #f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2055/networks/base_s_4_elec_3H-Ep328.2.nc",
             # f"../results/{snakemake.wildcards['scenario']}/i{snakemake.wildcards['iteration']}/y2130/networks/base_s_4_elec_3H-Ep150.4.nc",
         ]
         fp_triggers_op = [
@@ -1257,6 +1343,22 @@ if __name__ == "__main__":
                 "dims": ["year", "region", "carrier"],
             },
         },
+        "market_values_supply": {
+            "func": calculate_market_values_supply_REMIND,
+            "params": {
+                "comps": ["Generator"],
+                "grouper": ["region", "general_carrier"],
+                "z_cutoff": snakemake.config["remind_coupling"]["export_to_REMIND"][
+                    "z_cutoff"
+                ],
+                "map_to_remind": True,
+            },
+            "gdx": {
+                "name": "p32_PyPSA_MarketValueSupply",
+                "description": "Market values of supply-side generators [$/MWh]",
+                "dims": ["year", "region", "carrier"],
+            },
+        },
         "markups_demand": {
             "func": calculate_markups_demand,
             "params": {
@@ -1270,6 +1372,34 @@ if __name__ == "__main__":
                 "name": "p32_PyPSA_MarkupDemand",
                 "description": "Markups of demand-side end-users [$/MWh]",
                 "dims": ["year", "region", "enduse"],
+            },
+        },
+        "electricity_prices_demand": {
+            "func": calculate_sectoral_electricity_prices_REMIND,
+            "params": {
+                "grouper": ["region", "general_carrier"],
+                "z_cutoff": snakemake.config["remind_coupling"]["export_to_REMIND"][
+                    "z_cutoff"
+                ],
+                "map_to_remind": True,
+            },
+            "gdx": {
+                "name": "p32_PyPSA_SectoralElectricityPrices",
+                "description": "Electricity prices paid by demand-side end-users [$/MWh]",
+                "dims": ["year", "region", "carrier"],
+            },
+        },
+        "average_electricity_prices": {
+            "func": calculate_average_electricity_price,
+            "params": {
+                "z_cutoff": snakemake.config["remind_coupling"]["export_to_REMIND"][
+                    "z_cutoff"
+                ],
+            },
+            "gdx": {
+                "name": "p32_PyPSA_AverageElectricityPrice",
+                "description": "Average electricity price [$/MWh]",
+                "dims": ["year", "region"],
             },
         },
         "peak_residual_loads": {
