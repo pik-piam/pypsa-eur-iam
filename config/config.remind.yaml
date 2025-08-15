@@ -98,7 +98,7 @@ remind_coupling:
     # Use the operations network for data export, need to enable it above
     use_operations_network: false
     # zscore above which electricity scarcity prices are excluded (or false)
-    z_cutoff: 4
+    z_cutoff: 3
 
 logging:
   level: INFO
@@ -130,7 +130,7 @@ foresight: overnight
 # Wildcard docs in https://pypsa-eur.readthedocs.io/en/latest/wildcards.html
 scenario:
   clusters:
-  - 4  # REMIND coupling specific
+  - 10  # REMIND coupling specific
   opts:  # REMIND coupling specific
   - '3H-EpREMIND' #"-EpREMIND" is placeholder for setting the emissions prices through REMIND
   year: [2025, 2030, 2035, 2040, 2045, 2050, 2055, 2060, 2070, 2080, 2090, 2100, 2110, 2130, 2150]
@@ -1110,7 +1110,9 @@ solving:
 
   gurobi_hpc_tunnel:
     use_tunnel: True
-    tunnel_port: 26993
+    tunnel_port: 26998
+    login_node: "02"
+    timeout_s: 15
 
   solver_options:
     highs-default:
