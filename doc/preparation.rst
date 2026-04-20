@@ -1,7 +1,6 @@
+.. SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
 ..
-  SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
-
-  SPDX-License-Identifier: CC-BY-4.0
+.. SPDX-License-Identifier: CC-BY-4.0
 
 ##########################################
 Building Electricity Networks
@@ -62,12 +61,22 @@ Rule ``build_osm_network``
 
 .. automodule:: build_osm_network
 
+Rule ``build_tyndp_network``
+=============================
+
+.. automodule:: build_tyndp_network
+
 .. _base:
 
 Rule ``base_network``
 =============================
 
 .. automodule:: base_network
+
+Rule ``build_natura``
+=============================
+
+.. automodule:: build_natura
 
 
 Rule ``build_transmission_projects``

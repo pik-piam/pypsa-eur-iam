@@ -1,7 +1,6 @@
+.. SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
 ..
-  SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
-
-  SPDX-License-Identifier: CC-BY-4.0
+.. SPDX-License-Identifier: CC-BY-4.0
 
 ##########################################
 Building Sector-Coupled Networks
@@ -88,10 +87,40 @@ Rule ``build_geothermal_heat_potential``
 
 .. automodule:: build_geothermal_heat_potential
 
+Rule ``build_ates_potentials``
+==============================================================================
+
+.. automodule:: build_ates_potentials
+
+Rule ``build_dh_areas``
+==============================================================================
+
+.. automodule:: build_dh_areas
+
+Rule ``build_river_heat_potential``
+==============================================================================
+
+.. automodule:: build_river_heat_potential
+
+Rule ``build_sea_heat_potential``
+==============================================================================
+
+.. automodule:: build_sea_heat_potential
+
+Rule ``build_ptes_operations``
+==============================================================================
+
+.. automodule:: build_ptes_operations
+
 Rule ``build_tes_capacity_profiles``
 ==============================================================================
 
 .. automodule:: build_tes_capacity_profiles
+
+Rule ``build_eurostat_balances``
+==============================================================================
+
+.. automodule:: build_eurostat_balances
 
 Rule ``build_energy_totals``
 ==============================================================================
@@ -217,6 +246,11 @@ Rule ``build_temperature_profiles``
 ==============================================================================
 
 .. automodule:: build_temperature_profiles
+
+Rule ``build_mobility_profiles``
+==============================================================================
+
+.. automodule:: build_mobility_profiles
 
 Rule ``build_transport_demand``
 ==============================================================================

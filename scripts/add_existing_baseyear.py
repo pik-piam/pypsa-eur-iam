@@ -19,11 +19,12 @@ import xarray as xr
 
 from scripts._helpers import (
     configure_logging,
+    load_costs,
     sanitize_custom_columns,
     set_scenario_config,
     update_config_from_wildcards,
 )
-from scripts.add_electricity import load_costs, sanitize_carriers
+from scripts.add_electricity import sanitize_carriers
 from scripts.build_energy_totals import cartesian
 from scripts.definitions.heat_system import HeatSystem
 from scripts.prepare_sector_network import cluster_heat_buses, define_spatial
@@ -46,21 +47,25 @@ def add_build_year_to_new_assets(n: pypsa.Network, baseyear: int) -> None:
         Year in which optimized assets are built
     """
     # Give assets with lifetimes and no build year the build year baseyear
-    for c in n.iterate_components(["Link", "Generator", "Store"]):
-        assets = c.df.index[(c.df.lifetime != np.inf) & (c.df.build_year == 0)]
-        c.df.loc[assets, "build_year"] = baseyear
+    for c in n.components[["Link", "Generator", "Store"]]:
+        if c.static.empty:
+            continue
+        assets = c.static.index[
+            (c.static.lifetime != np.inf) & (c.static.build_year == 0)
+        ]
+        c.static.loc[assets, "build_year"] = baseyear
 
         # add -baseyear to name
-        rename = pd.Series(c.df.index, c.df.index)
+        rename = pd.Series(c.static.index, c.static.index)
         rename[assets] += f"-{str(baseyear)}"
-        c.df.rename(index=rename, inplace=True)
+        c.static.rename(index=rename, inplace=True)
 
         # rename time-dependent
         selection = n.component_attrs[c.name].type.str.contains(
             "series"
         ) & n.component_attrs[c.name].status.str.contains("Input")
         for attr in n.component_attrs[c.name].index[selection]:
-            c.pnl[attr] = c.pnl[attr].rename(columns=rename)
+            c.dynamic[attr] = c.dynamic[attr].rename(columns=rename)
 
 
 def add_existing_renewables(
@@ -207,6 +212,8 @@ def add_power_capacities_installed_before_baseyear(
         "Waste",
         "Other",
         "CCGT, Thermal",
+        "Battery",
+        "Heat Storage",
     ]
 
     technology_to_drop = ["Pv", "Storage Technologies"]
@@ -216,14 +223,16 @@ def add_power_capacities_installed_before_baseyear(
     df_agg.drop(df_agg.index[df_agg.Technology.isin(technology_to_drop)], inplace=True)
     df_agg.Fueltype = df_agg.Fueltype.map(rename_fuel)
 
-    # Intermediate fix for DateIn & DateOut
     # Fill missing DateIn
-    biomass_i = df_agg.loc[df_agg.Fueltype == "urban central solid biomass CHP"].index
-    mean = df_agg.loc[biomass_i, "DateIn"].mean()
-    df_agg.loc[biomass_i, "DateIn"] = df_agg.loc[biomass_i, "DateIn"].fillna(int(mean))
-    # Fill missing DateOut
-    dateout = df_agg.loc[biomass_i, "DateIn"] + lifetime_values["lifetime"]
-    df_agg.loc[biomass_i, "DateOut"] = df_agg.loc[biomass_i, "DateOut"].fillna(dateout)
+    df_agg["DateIn"] = df_agg.groupby("Fueltype")["DateIn"].transform(
+        lambda x: x.fillna(x.mean() // 1)
+    )
+    df_agg.dropna(subset="DateIn", inplace=True)
+
+    # Estimate missing DateOut
+    df_agg["DateOut"] = df_agg.DateOut.combine_first(
+        df_agg.DateIn + df_agg.Fueltype.map(costs.lifetime).fillna(30)
+    )
 
     # include renewables in df_agg
     add_existing_renewables(
@@ -248,9 +257,13 @@ def add_power_capacities_installed_before_baseyear(
         to_drop = df_agg[df_agg.DateIn > max(grouping_years)].index
         df_agg.drop(to_drop, inplace=True)
 
-    df_agg["grouping_year"] = np.take(
-        grouping_years, np.digitize(df_agg.DateIn, grouping_years, right=True)
-    )
+    df_agg["grouping_year"] = pd.cut(
+        df_agg.DateIn,
+        bins=grouping_years,
+        labels=grouping_years[1:],
+        right=True,
+        include_lowest=True,
+    ).astype(int)
 
     # calculate (adjusted) remaining lifetime before phase-out (+1 because assuming
     # phase out date at the end of the year)
@@ -598,17 +611,17 @@ def add_heating_capacities_installed_before_baseyear(
                     "Link",
                     nodes,
                     suffix=f" {heat_system} {heat_source} heat pump-{grouping_year}",
-                    bus0=nodes_elec,
-                    bus1=nodes + " " + heat_system.value + " heat",
+                    bus0=nodes + " " + heat_system.value + " heat",
+                    bus1=nodes_elec,
                     carrier=f"{heat_system} {heat_source} heat pump",
-                    efficiency=efficiency,
-                    capital_cost=costs.at[costs_name, "efficiency"]
-                    * costs.at[costs_name, "capital_cost"],
+                    efficiency=1 / efficiency.clip(lower=0.001),
+                    capital_cost=costs.at[costs_name, "capital_cost"],
                     p_nom=existing_capacities.loc[
                         nodes, (heat_system.value, f"{heat_source} heat pump")
                     ]
-                    * ratio
-                    / costs.at[costs_name, "efficiency"],
+                    * ratio,
+                    p_max_pu=0,
+                    p_min_pu=-1 * efficiency / efficiency.clip(lower=0.001),
                     build_year=int(grouping_year),
                     lifetime=costs.at[costs_name, "lifetime"],
                 )
@@ -693,6 +706,38 @@ def add_heating_capacities_installed_before_baseyear(
                 ],
             )
 
+            efficiency = get_efficiency(
+                heat_system, "biomass", nodes, heating_efficiencies, costs
+            )
+
+            # prevents redundant addition of urban central biomass boiler which tends to crash
+            if (
+                existing_capacities.loc[
+                    nodes, (heat_system.value, "biomass boiler")
+                ].sum()
+                > 0
+            ):
+                n.add(
+                    "Link",
+                    nodes,
+                    suffix=f" {heat_system} biomass boiler-{grouping_year}",
+                    bus0=spatial.biomass.nodes,
+                    bus1=nodes + " " + heat_system.value + " heat",
+                    carrier=heat_system.value + " biomass boiler",
+                    efficiency=efficiency,
+                    capital_cost=efficiency
+                    * costs.at["biomass boiler", "capital_cost"],
+                    p_nom=(
+                        existing_capacities.loc[
+                            nodes, (heat_system.value, "biomass boiler")
+                        ]
+                        * ratio
+                        / efficiency
+                    ),
+                    build_year=int(grouping_year),
+                    lifetime=costs.at["biomass boiler", "lifetime"],
+                )
+
             # delete links with p_nom=nan corresponding to extra nodes in country
             n.remove(
                 "Link",
@@ -745,12 +790,7 @@ if __name__ == "__main__":
     spatial = define_spatial(n.buses[n.buses.carrier == "AC"].index, options)
     add_build_year_to_new_assets(n, baseyear)
 
-    Nyears = n.snapshot_weightings.generators.sum() / 8760.0
-    costs = load_costs(
-        snakemake.input.costs,
-        snakemake.params.costs,
-        nyears=Nyears,
-    )
+    costs = load_costs(snakemake.input.costs)
 
     grouping_years_power = snakemake.params.existing_capacities["grouping_years_power"]
     grouping_years_heat = snakemake.params.existing_capacities["grouping_years_heat"]

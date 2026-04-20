@@ -5,15 +5,14 @@
 import contextlib
 import copy
 import functools
-import hashlib
 import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from functools import partial, wraps
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Callable, Union
 
 import atlite
 import fiona
@@ -36,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 REGION_COLS = ["geometry", "name", "x", "y", "country"]
 
-PYPSA_V1 = bool(re.match(r"^0\.35\.\d\.post1\.dev\d{3}", pypsa.__version__))
+PYPSA_V1 = bool(re.match(r"^1\.\d", pypsa.__version__))
 
 DEFAULT_TUNNEL_PORT = 1080
 DEFAULT_LOGIN_NODE = "01"
@@ -162,6 +161,27 @@ def path_provider(dir, rdir, shared_resources, exclude_from_shared):
         shared_resources=shared_resources,
         exclude_from_shared=exclude_from_shared,
     )
+
+
+def script_path_provider(project_dir: Path) -> Callable[[str], Path]:
+    """
+    Returns a function that provides the full path to a script given its name.
+
+    Parameters
+    ----------
+    project_dir : Path
+        The root directory of the project (where the script directory is located).
+
+    Returns
+    -------
+    Callable[[str], Path]
+        A function that takes a script name as input and returns the full path to the script.
+    """
+
+    def _get_script_path(script: str) -> Path:
+        return Path("file://") / project_dir / "scripts" / script
+
+    return _get_script_path
 
 
 def get_shadow(run):
@@ -386,21 +406,21 @@ def aggregate_costs(n, flatten=False, opts=None, existing_only=False):
 
     costs = {}
     for c, (p_nom, p_attr) in zip(
-        n.iterate_components(components.keys(), skip_empty=False), components.values()
+        n.components[list(components.keys())], components.values()
     ):
-        if c.df.empty:
+        if c.static.empty:
             continue
         if not existing_only:
             p_nom += "_opt"
         costs[(c.list_name, "capital")] = (
-            (c.df[p_nom] * c.df.capital_cost).groupby(c.df.carrier).sum()
+            (c.static[p_nom] * c.static.capital_cost).groupby(c.static.carrier).sum()
         )
         if p_attr is not None:
-            p = c.pnl[p_attr].sum()
+            p = c.dynamic[p_attr].sum()
             if c.name == "StorageUnit":
                 p = p.loc[p > 0]
             costs[(c.list_name, "marginal")] = (
-                (p * c.df.marginal_cost).groupby(c.df.carrier).sum()
+                (p * c.static.marginal_cost).groupby(c.static.carrier).sum()
             )
     costs = pd.concat(costs)
 
@@ -419,29 +439,30 @@ def aggregate_costs(n, flatten=False, opts=None, existing_only=False):
 
 def progress_retrieve(url, file, disable=False):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    # Hotfix - Bug, tqdm not working with disable=False
-    disable = True
 
-    if disable:
-        response = requests.get(url, headers=headers, stream=True)
+    Path(file).parent.mkdir(parents=True, exist_ok=True)
+
+    # Raise HTTPError for transient errors
+    # 429: Too Many Requests (rate limiting)
+    # 500, 502, 503, 504: Server errors
+    response = requests.get(url, headers=headers, stream=True)
+    if response.status_code in (429, 500, 502, 503, 504):
+        response.raise_for_status()
+    total_size = int(response.headers.get("content-length", 0))
+    chunk_size = 1024
+
+    with tqdm(
+        total=total_size,
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+        desc=str(file),
+        disable=disable,
+    ) as t:
         with open(file, "wb") as f:
-            f.write(response.content)
-    else:
-        response = requests.get(url, headers=headers, stream=True)
-        total_size = int(response.headers.get("content-length", 0))
-        chunk_size = 1024
-
-        with tqdm(
-            total=total_size,
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            desc=str(file),
-        ) as t:
-            with open(file, "wb") as f:
-                for data in response.iter_content(chunk_size=chunk_size):
-                    f.write(data)
-                    t.update(len(data))
+            for data in response.iter_content(chunk_size=chunk_size):
+                f.write(data)
+                t.update(len(data))
 
 
 def retry(func: Callable) -> Callable:
@@ -517,13 +538,17 @@ def mock_snakemake(
     import os
 
     import snakemake as sm
+    from packaging import version
     from pypsa.definitions.structures import Dict
+    from snakemake import __version__ as sm_version
     from snakemake.api import Workflow
     from snakemake.common import SNAKEFILE_CHOICES
+    from snakemake.logging import LoggerManager
     from snakemake.script import Snakemake
     from snakemake.settings.types import (
         ConfigSettings,
         DAGSettings,
+        OutputSettings,
         ResourceSettings,
         StorageSettings,
         WorkflowSettings,
@@ -564,15 +589,25 @@ def mock_snakemake(
         workflow_settings = WorkflowSettings()
         storage_settings = StorageSettings()
         dag_settings = DAGSettings(rerun_triggers=[])
-        workflow = Workflow(
-            config_settings,
-            resource_settings,
-            workflow_settings,
-            storage_settings,
-            dag_settings,
+
+        workflow_kwargs = dict(
+            config_settings=config_settings,
+            resource_settings=resource_settings,
+            workflow_settings=workflow_settings,
+            storage_settings=storage_settings,
+            dag_settings=dag_settings,
             storage_provider_settings=dict(),
             overwrite_workdir=workdir,
         )
+
+        # Snakemake version-dependent logger handling
+        if version.parse(sm_version) >= version.parse("9.14.6"):
+            output_settings = OutputSettings()
+            workflow_kwargs["logger_manager"] = LoggerManager(
+                logger=logger, settings=output_settings
+            )
+
+        workflow = Workflow(**workflow_kwargs)
         workflow.include(snakefile)
 
         if configfiles:
@@ -687,7 +722,7 @@ def update_config_from_wildcards(config, w, inplace=True):
                 config["electricity"]["gaslimit"] = gasl_value * 1e6
 
         if "Ept" in opts:
-            config["costs"]["emission_prices"]["co2_monthly_prices"] = True
+            config["costs"]["emission_prices"]["dynamic"] = True
 
         ep_enable, ep_value = find_opt(opts, "Ep")
         if ep_enable:
@@ -710,18 +745,19 @@ def update_config_from_wildcards(config, w, inplace=True):
             flags = ["+e", "+p", "+m", "+c"]
             if all(flag not in o for flag in flags):
                 continue
-            carrier, attr_factor = o.split("+")
+            carrier, component, attr_factor = o.split("+")
             attr = attr_lookup[attr_factor[0]]
             factor = float(attr_factor[1:])
             if not isinstance(config["adjustments"]["electricity"], dict):
                 config["adjustments"]["electricity"] = dict()
             update_config(
-                config["adjustments"]["electricity"], {attr: {carrier: factor}}
+                config["adjustments"]["electricity"],
+                {"factor": {component: {carrier: {attr: factor}}}},
             )
 
         for o in opts:
             if o.startswith("lv") or o.startswith("lc"):
-                config["electricity"]["transmission_expansion"] = o[1:]
+                config["electricity"]["transmission_limit"] = o[1:]
                 break
 
     if w.get("sector_opts"):
@@ -815,12 +851,15 @@ def update_config_from_wildcards(config, w, inplace=True):
             flags = ["+e", "+p", "+m", "+c"]
             if all(flag not in o for flag in flags):
                 continue
-            carrier, attr_factor = o.split("+")
+            carrier, component, attr_factor = o.split("+")
             attr = attr_lookup[attr_factor[0]]
             factor = float(attr_factor[1:])
             if not isinstance(config["adjustments"]["sector"], dict):
                 config["adjustments"]["sector"] = dict()
-            update_config(config["adjustments"]["sector"], {attr: {carrier: factor}})
+            update_config(
+                config["adjustments"]["sector"],
+                {"factor": {component: {carrier: {attr: factor}}}},
+            )
 
         _, sdr_value = find_opt(opts, "sdr")
         if sdr_value is not None:
@@ -1031,448 +1070,6 @@ def read_remind_data(file_path, variable_name, rename_columns={}, error_on_empty
     return df
 
 
-@functools.lru_cache
-def get_technology_mapping(
-    fn: str or Path,
-    group_technologies: bool = False,
-):
-    """
-    Get a mapping between technologies in REMIND and PyPSA-EUR, inferred from
-    the technology_cost_mapping file.
-
-    Technologies can also be mapped to grouped technologies.
-
-    Parameters
-    ----------
-    fn : str
-        Path to the technology cost mapping file.
-    group_technologies : bool, optional
-        Whether to group technologies, by default False.
-
-    Returns
-    -------
-    pd.DataFrame
-        Dataframe containing the technology mapping with columns "PyPSA-Eur" and "REMIND-EU".
-        If group_technologies is True, the dataframe will contain an additional column "technology_group".
-    """
-
-    new_mapping = pd.read_csv(fn)
-    new_mapping = new_mapping.query("parameter == 'investment'")
-    new_mapping = new_mapping.query(
-        "`couple to` == 'mapping generation weighted to reference REMIND-EU technology'"
-    )
-
-    new_mapping = new_mapping[["PyPSA-EUR technology", "reference"]]
-    # convert potential list-like entries to real list
-    new_mapping["reference"] = new_mapping["reference"].map(yaml.safe_load)
-    # Turn all list-entries into separate rows
-    new_mapping = new_mapping.explode("reference")
-    new_mapping = new_mapping.rename(
-        columns={"PyPSA-EUR technology": "PyPSA-Eur", "reference": "REMIND-EU"}
-    )
-
-    if not (offwind := new_mapping.loc[new_mapping["PyPSA-Eur"] == "offwind"]).empty:
-        logger.info(
-            "'offwind' technology detected. Adding offwind-ac and offwind-dc to technology mapping..."
-        )
-        new_mapping = pd.concat(
-            [
-                new_mapping,
-                offwind.replace("offwind", "offwind-ac"),
-                offwind.replace("offwind", "offwind-dc"),
-            ]
-        ).reset_index(drop=True)
-
-    if "hydro" in new_mapping["PyPSA-Eur"].unique() and (
-        "ror" not in new_mapping["PyPSA-Eur"].unique()
-        or "PHS" not in new_mapping["PyPSA-Eur"].unique()
-    ):
-        logger.info(
-            "'hydro' technology but 'ror' and/or 'PHS' are missing. Adding 'ror' and 'PHS' to technology mapping..."
-        )
-        hydro = new_mapping.loc[new_mapping["PyPSA-Eur"] == "hydro"]
-        new_mapping = pd.concat(
-            [
-                new_mapping,
-                hydro.replace({"PyPSA-Eur": {"hydro": "ror"}}),
-                hydro.replace({"PyPSA-Eur": {"hydro": "PHS"}}),
-            ]
-        ).reset_index(drop=True)
-
-    # get all unique row combinations
-    new_mapping = new_mapping.drop_duplicates().reset_index(drop=True)
-
-    if group_technologies:
-        # Determine PyPSA-Eur technologies/carriers which share the same constrained (= are mapped from the same REMIND technologies)
-        new_mapping = (
-            new_mapping.groupby("PyPSA-Eur")
-            .agg(lambda x: tuple(sorted(x)))
-            .reset_index()
-            .groupby("REMIND-EU", as_index=False)
-            .agg(lambda x: list(x))
-        )
-
-        # Create groups of PyPSA-Eur technologies, e.g. ['solar', 'solar rooftop'] -> "solar & solar rooftop"
-        new_mapping["technology_group"] = new_mapping["PyPSA-Eur"].apply(
-            lambda x: " & ".join(x)
-        )
-        new_mapping = new_mapping.explode("REMIND-EU").explode("PyPSA-Eur")
-
-    return new_mapping
-
-
-def get_region_mapping(
-    fn,
-    source: str = "REMIND-EU",
-    target: str = "PyPSA-EUR",
-    flatten: bool = False,
-) -> dict:
-    """
-    Get a mapping between regions in REMIND and PyPSA-EUR.
-
-    The mapping from REMIND-EU between regions and countries is read from file (fn),
-    which is directly taken from the REMIND-EU model.
-    The corresponding countries in PyPSA-EUR are determined using the country_converter.
-    Valid values for source and target are: remind, pypsa-eur.
-    Lower and uppercase are ignored.
-
-    Parameters
-    ----------
-    fn : str
-        Path to the region mapping file from REMIND-EU.
-    source : str, optional
-        Region mapping source, by default "remind-eu"
-    target : str, optional
-        Region mapping target, by default "pypsa-eur"
-    flatten : bool, optional
-        Whether to try to flatten the mapping; only valid
-        if the mapping is unique for all keys.
-        Default False.
-    """
-    import country_converter as coco
-
-    # Create region mapping by loading the original mapping from REMIND-EU from file
-    # and then mapping ISO 3166-1 alpha-3 country codes to PyPSA-EUR ISO 3166-1 alpha-2 country codes
-    logger.info("Loading region mapping...")
-    region_mapping = pd.read_csv(fn, sep=";").rename(
-        columns={"RegionCode": "remind-eu"}
-    )
-
-    region_mapping["pypsa-eur"] = coco.convert(
-        names=region_mapping["CountryCode"], to="ISO2"
-    )
-    region_mapping = region_mapping[["pypsa-eur", "remind-eu"]]
-
-    # Append Kosovo to region mapping, not present in standard mapping and uses non-standard "KV" in PyPSA-EUR
-    logger.info(
-        "Manually adding Kosovo to region mapping (PyPSA-EUR: KV, REMIND-EU: part of NES region) ..."
-    )
-    region_mapping = pd.concat(
-        [
-            region_mapping,
-            pd.DataFrame(
-                {
-                    "remind-eu": "NES",
-                    "pypsa-eur": "KV",
-                },
-                columns=["pypsa-eur", "remind-eu"],
-                index=[0],
-            ),
-        ]
-    ).reset_index(drop=True)
-
-    region_mapping = (
-        region_mapping.groupby(source.lower())[target.lower()]
-        .apply("unique")
-        .apply(list)
-    )
-
-    if flatten:
-        if (region_mapping.apply(lambda x: len(x)) != 1).any():
-            logger.error(f"Cannot flatten mapping. Non-unique map contained:\n {df}")
-
-        region_mapping = region_mapping.apply(lambda x: x[0])
-
-    return region_mapping.to_dict()
-
-
-def read_remind_data(file_path, variable_name, rename_columns={}, error_on_empty=True):
-    """
-    Auxiliary function for standardised and cached reading of REMIND-EU data
-    files to pandas.DataFrame.
-
-    Here all values read are considered variable, i.e. use
-    "variable_name" also for what is considered a "parameter" in the GDX
-    file.
-    """
-    from gamspy import Container
-
-    @functools.lru_cache
-    def _read_and_cache_remind_file(fp):
-        return Container(load_from=fp)
-
-    data = _read_and_cache_remind_file(file_path)[variable_name]
-    df = data.records
-
-    if error_on_empty and (df is None or df.empty):
-        raise ValueError(f"{variable_name} is empty. In: {file_path}")
-
-    df = df.rename(columns=rename_columns, errors="raise")
-
-    return df
-
-
-@functools.lru_cache
-def get_technology_mapping(
-    fn: str or Path,
-    group_technologies: bool = False,
-):
-    """
-    Get a mapping between technologies in REMIND and PyPSA-EUR, inferred from
-    the technology_cost_mapping file.
-
-    Technologies can also be mapped to grouped technologies.
-
-    Parameters
-    ----------
-    fn : str
-        Path to the technology cost mapping file.
-    group_technologies : bool, optional
-        Whether to group technologies, by default False.
-
-    Returns
-    -------
-    pd.DataFrame
-        Dataframe containing the technology mapping with columns "PyPSA-Eur" and "REMIND-EU".
-        If group_technologies is True, the dataframe will contain an additional column "technology_group".
-    """
-
-    new_mapping = pd.read_csv(fn)
-    new_mapping = new_mapping.query("parameter == 'investment'")
-    new_mapping = new_mapping.query(
-        "`couple to` == 'mapping generation weighted to reference REMIND-EU technology'"
-    )
-
-    new_mapping = new_mapping[["PyPSA-EUR technology", "reference"]]
-    # convert potential list-like entries to real list
-    new_mapping["reference"] = new_mapping["reference"].map(yaml.safe_load)
-    # Turn all list-entries into separate rows
-    new_mapping = new_mapping.explode("reference")
-    new_mapping = new_mapping.rename(
-        columns={"PyPSA-EUR technology": "PyPSA-Eur", "reference": "REMIND-EU"}
-    )
-
-    if not (offwind := new_mapping.loc[new_mapping["PyPSA-Eur"] == "offwind"]).empty:
-        logger.info(
-            "'offwind' technology detected. Adding offwind-ac and offwind-dc to technology mapping..."
-        )
-        new_mapping = pd.concat(
-            [
-                new_mapping,
-                offwind.replace("offwind", "offwind-ac"),
-                offwind.replace("offwind", "offwind-dc"),
-            ]
-        ).reset_index(drop=True)
-
-    if "hydro" in new_mapping["PyPSA-Eur"].unique() and (
-        "ror" not in new_mapping["PyPSA-Eur"].unique()
-        or "PHS" not in new_mapping["PyPSA-Eur"].unique()
-    ):
-        logger.info(
-            "'hydro' technology but 'ror' and/or 'PHS' are missing. Adding 'ror' and 'PHS' to technology mapping..."
-        )
-        hydro = new_mapping.loc[new_mapping["PyPSA-Eur"] == "hydro"]
-        new_mapping = pd.concat(
-            [
-                new_mapping,
-                hydro.replace({"PyPSA-Eur": {"hydro": "ror"}}),
-                hydro.replace({"PyPSA-Eur": {"hydro": "PHS"}}),
-            ]
-        ).reset_index(drop=True)
-
-    # get all unique row combinations
-    new_mapping = new_mapping.drop_duplicates().reset_index(drop=True)
-
-    if group_technologies:
-        # Determine PyPSA-Eur technologies/carriers which share the same constrained (= are mapped from the same REMIND technologies)
-        new_mapping = (
-            new_mapping.groupby("PyPSA-Eur")
-            .agg(lambda x: tuple(sorted(x)))
-            .reset_index()
-            .groupby("REMIND-EU", as_index=False)
-            .agg(lambda x: list(x))
-        )
-
-        # Create groups of PyPSA-Eur technologies, e.g. ['solar', 'solar rooftop'] -> "solar & solar rooftop"
-        new_mapping["technology_group"] = new_mapping["PyPSA-Eur"].apply(
-            lambda x: " & ".join(x)
-        )
-        new_mapping = new_mapping.explode("REMIND-EU").explode("PyPSA-Eur")
-
-    return new_mapping
-
-
-def get_region_mapping(
-    fn,
-    source: str = "REMIND-EU",
-    target: str = "PyPSA-EUR",
-    flatten: bool = False,
-) -> dict:
-    """
-    Get a mapping between regions in REMIND and PyPSA-EUR.
-
-    The mapping from REMIND-EU between regions and countries is read from file (fn),
-    which is directly taken from the REMIND-EU model.
-    The corresponding countries in PyPSA-EUR are determined using the country_converter.
-    Valid values for source and target are: remind, pypsa-eur.
-    Lower and uppercase are ignored.
-
-    Parameters
-    ----------
-    fn : str
-        Path to the region mapping file from REMIND-EU.
-    source : str, optional
-        Region mapping source, by default "remind-eu"
-    target : str, optional
-        Region mapping target, by default "pypsa-eur"
-    flatten : bool, optional
-        Whether to try to flatten the mapping; only valid
-        if the mapping is unique for all keys.
-        Default False.
-    """
-    import country_converter as coco
-
-    # Create region mapping by loading the original mapping from REMIND-EU from file
-    # and then mapping ISO 3166-1 alpha-3 country codes to PyPSA-EUR ISO 3166-1 alpha-2 country codes
-    logger.info("Loading region mapping...")
-    region_mapping = pd.read_csv(fn, sep=";").rename(
-        columns={"RegionCode": "remind-eu"}
-    )
-
-    region_mapping["pypsa-eur"] = coco.convert(
-        names=region_mapping["CountryCode"], to="ISO2"
-    )
-    region_mapping = region_mapping[["pypsa-eur", "remind-eu"]]
-
-    # Append Kosovo to region mapping, not present in standard mapping and uses non-standard "KV" in PyPSA-EUR
-    logger.info(
-        "Manually adding Kosovo to region mapping (PyPSA-EUR: KV, REMIND-EU: part of NES region) ..."
-    )
-    region_mapping = pd.concat(
-        [
-            region_mapping,
-            pd.DataFrame(
-                {
-                    "remind-eu": "NES",
-                    "pypsa-eur": "KV",
-                },
-                columns=["pypsa-eur", "remind-eu"],
-                index=[0],
-            ),
-        ]
-    ).reset_index(drop=True)
-
-    region_mapping = (
-        region_mapping.groupby(source.lower())[target.lower()]
-        .apply("unique")
-        .apply(list)
-    )
-
-    if flatten:
-        if (region_mapping.apply(lambda x: len(x)) != 1).any():
-            logger.error(f"Cannot flatten mapping. Non-unique map contained:\n {df}")
-
-        region_mapping = region_mapping.apply(lambda x: x[0])
-
-    return region_mapping.to_dict()
-
-
-def read_remind_data(file_path, variable_name, rename_columns={}, error_on_empty=True):
-    """
-    Auxiliary function for standardised and cached reading of REMIND-EU data
-    files to pandas.DataFrame.
-
-    Here all values read are considered variable, i.e. use
-    "variable_name" also for what is considered a "parameter" in the GDX
-    file.
-    """
-    from gamspy import Container
-
-    @functools.lru_cache
-    def _read_and_cache_remind_file(fp):
-        return Container(load_from=fp)
-
-    data = _read_and_cache_remind_file(file_path)[variable_name]
-    df = data.records
-
-    if error_on_empty and (df is None or df.empty):
-        raise ValueError(f"{variable_name} is empty. In: {file_path}")
-
-    df = df.rename(columns=rename_columns, errors="raise")
-
-    return df
-
-
-def get_checksum_from_zenodo(file_url):
-    parts = file_url.split("/")
-    record_id = parts[parts.index("records") + 1]
-    filename = parts[-1]
-
-    response = requests.get(f"https://zenodo.org/api/records/{record_id}", timeout=30)
-    response.raise_for_status()
-    data = response.json()
-
-    for file in data["files"]:
-        if file["key"] == filename:
-            return file["checksum"]
-    return None
-
-
-def validate_checksum(file_path, zenodo_url=None, checksum=None):
-    """
-    Validate file checksum against provided or Zenodo-retrieved checksum.
-    Calculates the hash of a file using 64KB chunks. Compares it against a
-    given checksum or one from a Zenodo URL.
-
-    Parameters
-    ----------
-    file_path : str
-        Path to the file for checksum validation.
-    zenodo_url : str, optional
-        URL of the file on Zenodo to fetch the checksum.
-    checksum : str, optional
-        Checksum (format 'hash_type:checksum_value') for validation.
-
-    Raises
-    ------
-    AssertionError
-        If the checksum does not match, or if neither `checksum` nor `zenodo_url` is provided.
-
-
-    Examples
-    --------
-    >>> validate_checksum("/path/to/file", checksum="md5:abc123...")
-    >>> validate_checksum(
-    ...     "/path/to/file",
-    ...     zenodo_url="https://zenodo.org/records/12345/files/example.txt",
-    ... )
-
-    If the checksum is invalid, an AssertionError will be raised.
-    """
-    assert checksum or zenodo_url, "Either checksum or zenodo_url must be provided"
-    if zenodo_url:
-        checksum = get_checksum_from_zenodo(zenodo_url)
-    hash_type, checksum = checksum.split(":")
-    hasher = hashlib.new(hash_type)
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):  # 64kb chunks
-            hasher.update(chunk)
-    calculated_checksum = hasher.hexdigest()
-    assert calculated_checksum == checksum, (
-        "Checksum is invalid. This may be due to an incomplete download. Delete the file and re-execute the rule."
-    )
-
-
 def get_snapshots(
     snapshots: dict, drop_leap_day: bool = False, freq: str = "h", **kwargs
 ) -> pd.DatetimeIndex:
@@ -1629,7 +1226,7 @@ def rename_techs(label: str) -> str:
 
 
 def load_cutout(
-    cutout_files: Union[str, list[str]], time: Union[None, pd.DatetimeIndex] = None
+    cutout_files: str | list[str], time: None | pd.DatetimeIndex = None
 ) -> atlite.Cutout:
     """
     Load and optionally combine multiple cutout files.
@@ -1660,141 +1257,22 @@ def load_cutout(
     return cutout
 
 
-def sanitize_custom_columns(n: pypsa.Network):
+def load_costs(cost_file: str) -> pd.DataFrame:
     """
-    Sanitize non-standard columns used throughout the workflow.
+    Load prepared cost data from CSV.
 
     Parameters
     ----------
-        n (pypsa.Network): The network object.
+    cost_file : str
+        Path to the CSV file containing cost data
 
     Returns
     -------
-        None
+    costs : pd.DataFrame
+        DataFrame containing the prepared cost data
     """
-    if "reversed" in n.links.columns:
-        # Replace NA values with default value False
-        n.links.loc[n.links.reversed.isna(), "reversed"] = False
-        n.links.reversed = n.links.reversed.astype(bool)
 
-
-def rename_techs(label: str) -> str:
-    """
-    Rename technology labels for better readability.
-
-    Removes some prefixes and renames if certain conditions defined in function body are met.
-
-    Parameters
-    ----------
-    label: str
-        Technology label to be renamed
-
-    Returns
-    -------
-    str
-        Renamed label
-    """
-    prefix_to_remove = [
-        "residential ",
-        "services ",
-        "urban ",
-        "rural ",
-        "central ",
-        "decentral ",
-    ]
-
-    rename_if_contains = [
-        "CHP",
-        "gas boiler",
-        "biogas",
-        "solar thermal",
-        "air heat pump",
-        "ground heat pump",
-        "resistive heater",
-        "Fischer-Tropsch",
-    ]
-
-    rename_if_contains_dict = {
-        "water tanks": "hot water storage",
-        "retrofitting": "building retrofitting",
-        # "H2 Electrolysis": "hydrogen storage",
-        # "H2 Fuel Cell": "hydrogen storage",
-        # "H2 pipeline": "hydrogen storage",
-        "battery": "battery storage",
-        "H2 for industry": "H2 for industry",
-        "land transport fuel cell": "land transport fuel cell",
-        "land transport oil": "land transport oil",
-        "oil shipping": "shipping oil",
-        # "CC": "CC"
-    }
-
-    rename = {
-        "solar": "solar PV",
-        "Sabatier": "methanation",
-        "offwind": "offshore wind",
-        "offwind-ac": "offshore wind (AC)",
-        "offwind-dc": "offshore wind (DC)",
-        "offwind-float": "offshore wind (Float)",
-        "onwind": "onshore wind",
-        "ror": "hydroelectricity",
-        "hydro": "hydroelectricity",
-        "PHS": "hydroelectricity",
-        "NH3": "ammonia",
-        "co2 Store": "DAC",
-        "co2 stored": "CO2 sequestration",
-        "AC": "transmission lines",
-        "DC": "transmission lines",
-        "B2B": "transmission lines",
-    }
-
-    for ptr in prefix_to_remove:
-        if label[: len(ptr)] == ptr:
-            label = label[len(ptr) :]
-
-    for rif in rename_if_contains:
-        if rif in label:
-            label = rif
-
-    for old, new in rename_if_contains_dict.items():
-        if old in label:
-            label = new
-
-    for old, new in rename.items():
-        if old == label:
-            label = new
-    return label
-
-
-def load_cutout(
-    cutout_files: Union[str, list[str]], time: Union[None, pd.DatetimeIndex] = None
-) -> atlite.Cutout:
-    """
-    Load and optionally combine multiple cutout files.
-
-    Parameters
-    ----------
-    cutout_files : str or list of str
-        Path to a single cutout file or a list of paths to multiple cutout files.
-        If a list is provided, the cutouts will be concatenated along the time dimension.
-    time : pd.DatetimeIndex, optional
-        If provided, select only the specified times from the cutout.
-
-    Returns
-    -------
-    atlite.Cutout
-        Merged cutout with optional time selection applied.
-    """
-    if isinstance(cutout_files, str):
-        cutout = atlite.Cutout(cutout_files)
-    elif isinstance(cutout_files, list):
-        cutout_da = [atlite.Cutout(c).data for c in cutout_files]
-        combined_data = xr.concat(cutout_da, dim="time", data_vars="minimal")
-        cutout = atlite.Cutout(NamedTemporaryFile().name, data=combined_data)
-
-    if time is not None:
-        cutout.data = cutout.data.sel(time=time)
-
-    return cutout
+    return pd.read_csv(cost_file, index_col=0)
 
 
 def is_tunnel_alive(tunnel_config: dict):
