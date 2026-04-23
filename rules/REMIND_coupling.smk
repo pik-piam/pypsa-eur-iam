@@ -7,9 +7,8 @@
 
 # Download and prepare all files, which are independent of REMIND inputs
 # Requires internet connection on login node.
-# Call with snakemake -s Snakefile_REMIND -c 4 prepare_REMIND --until add_electricity
-# TODO: Adjust to new rule "add_electricity_REMIND"
-rule prepare_REMIND:
+# Call with snakemake -s Snakefile_REMIND -c 4 download_and_prepare_REMIND
+rule download_and_prepare_REMIND:
     input:
         expand(
             rules.add_electricity.output[0],
@@ -17,11 +16,10 @@ rule prepare_REMIND:
         )
 
 # This part contains all rules, which get data from REMIND between iterations.
-# PyPSA-EUR networks are solved between iterations via snakemake calls
-
-# Some of the new rules have additional wildcards:
-# * {year}: Indicating the REMIND year for which the model is built
-# * {iteration}: Indicating the REMIND iteration for which the model is built
+# New wildcards introduced in this part:
+# * {scen_REMIND}: REMIND scenario name
+# * {year_REMIND}: REMIND year
+# * {iter_REMIND}: REMIND iteration
 
 # This rule need to be called first in a separate snakemake call.
 # Afterwards, use --configfile in the next snakemake call.
@@ -35,12 +33,12 @@ checkpoint import_REMIND_config:
     input:
         config_default="config/config.remind.yaml",
         remind2config="config/remind2config.yaml",
-        remind_config=RESOURCES + "{scenario}/i{iteration}/REMIND2PyPSAEUR_config.gdx",
-        remind_data=SCENARIO_RESOURCES + "i{iteration}/REMIND2PyPSAEUR.gdx",
+        remind_config=RESOURCES + "{scen_REMIND}/i{iter_REMIND}/REMIND2PyPSAEUR_config.gdx",
+        remind_data=SCENARIO_RESOURCES + "i{iter_REMIND}/REMIND2PyPSAEUR.gdx",
         region_mapping="config/regionmapping_21_EU11.csv",
     output:
-        config=RESOURCES + "{scenario}/i{iteration}/config.remind_scenario.yaml",
-        scenario_wildcards=RESOURCES + "{scenario}/i{iteration}/scenario_wildcards.csv",
+        config=RESOURCES + "{scen_REMIND}/i{iter_REMIND}/config.remind_scenario.yaml",
+        scenario_wildcards=RESOURCES + "{scen_REMIND}/i{iter_REMIND}/scenario_wildcards.csv",
     log:
         ITERATION_LOGS + "import_REMIND_config.log",
     benchmark:
@@ -63,19 +61,6 @@ rule import_REMIND_demand:
     script:
         scripts("import_REMIND_demand.py")
 
-# Input 1b: Read hydro capacity and generation targets from REMIND.
-rule import_REMIND_hydro:
-    input:
-        remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
-        region_mapping="config/regionmapping_21_EU11.csv",
-    output:
-        hydro_targets=ITERATION_RESOURCES + "hydro_targets.csv",
-    log:
-        ITERATION_LOGS + "import_REMIND_hydro.log",
-    benchmark:
-        ITERATION_BENCHMARKS + "import_REMIND_hydro"
-    script:
-        scripts("import_REMIND_hydro.py")
 
 # Input 2: Read capacity data from REMIND and create a csv with the installed capacities for each technology and region.
 rule import_REMIND_capacities:
@@ -113,23 +98,38 @@ rule import_REMIND_costs:
         max_hours=config_provider("electricity", "max_hours"),
     input:
         # no TD data for < 2020 and > 2050
-        original_costs=lambda w: f"resources/costs_{max(2020, min(int(w['year']), 2050))}.csv",
+        original_costs=lambda w: f"resources/costs_{max(2020, min(int(w['year_REMIND']), 2050))}.csv",
         network=resources("networks/base_s.nc"),
         custom_costs=config_provider("costs", "custom_cost_fn"),
         region_mapping="config/regionmapping_21_EU11.csv",
         technology_cost_mapping="config/technology_cost_mapping.csv",
         remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
     output:
-        costs_processed=ITERATION_RESOURCES + "y{year}/costs_processed.csv",
-        costs_raw_overwritten=ITERATION_RESOURCES + "y{year}/costs_raw_overwritten.csv",
+        costs_processed=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed.csv",
+        costs_raw_overwritten=ITERATION_RESOURCES + "y{year_REMIND}/costs_raw_overwritten.csv",
     log:
-        ITERATION_LOGS + "y{year}/import_REMIND_costs.log",
+        ITERATION_LOGS + "y{year_REMIND}/import_REMIND_costs.log",
     benchmark:
-        ITERATION_BENCHMARKS + "y{year}/import_REMIND_costs"
+        ITERATION_BENCHMARKS + "y{year_REMIND}/import_REMIND_costs"
     group:
         "iy"
     script:
         scripts("import_REMIND_costs.py")
+
+# Input 5: Special case for hydro, read capacity and generation from REMIND.
+# In add_electricity_sector_REMIND, hydro infeed and capacity is adjusted to follow REMIND's capacity factor.
+rule import_REMIND_hydro:
+    input:
+        remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
+        region_mapping="config/regionmapping_21_EU11.csv",
+    output:
+        hydro_targets=ITERATION_RESOURCES + "hydro_targets.csv",
+    log:
+        ITERATION_LOGS + "import_REMIND_hydro.log",
+    benchmark:
+        ITERATION_BENCHMARKS + "import_REMIND_hydro"
+    script:
+        scripts("import_REMIND_hydro.py")
 
 # Adjust powerplants database based on REMIND capacities
 rule adjust_powerplants_REMIND:
@@ -139,12 +139,14 @@ rule adjust_powerplants_REMIND:
         powerplants=resources("powerplants_s_{clusters}.csv"),
         capacities=ITERATION_RESOURCES + "installed_capacities.csv",
         region_mapping="config/regionmapping_21_EU11.csv",
+        # TODO
+        
     output:
-        powerplants_adjusted=SCENARIO_RESOURCES + "i{iteration}/y{year}/powerplants_adjusted_s_{clusters}.csv",
+        powerplants_adjusted=SCENARIO_RESOURCES + "i{iter_REMIND}/y{year_REMIND}/powerplants_adjusted_s_{clusters}.csv",
     log:
-        LOGS + "{scenario}/i{iteration}/y{year}/adjust_powerplants_s_{clusters}.log",
+        LOGS + "{scen_REMIND}/i{iter_REMIND}/y{year_REMIND}/adjust_powerplants_s_{clusters}.log",
     benchmark:
-        BENCHMARKS + "{scenario}/i{iteration}/y{year}/adjust_powerplants_s_{clusters}"
+        BENCHMARKS + "{scen_REMIND}/i{iter_REMIND}/y{year_REMIND}/adjust_powerplants_s_{clusters}"
     group:
         "iy"
     script:
@@ -173,6 +175,7 @@ rule build_hourly_water_heat_demand_REMIND:
         "../scripts/build_hourly_water_heat_demand_REMIND.py"
 
 # This is the main rule that brings all REMIND inputs together and creates the electricity network for the given scenario, iteration and year.
+# TODO: Revert to default add_electricity and use this rule to overwrite afterwards?
 rule add_electricity_sector_REMIND:
     message:
         "Adding electricity and sector coupling to REMIND-coupled network"
@@ -204,9 +207,9 @@ rule add_electricity_sector_REMIND:
         unpack(input_class_regions),
         unpack(input_conventional),
         base_network=resources("networks/base_s_{clusters}.nc"),
-        costs=ITERATION_RESOURCES + "y{year}/costs_processed.csv",  # REMIND specific
+        costs=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed.csv",  # REMIND specific
         regions=resources("regions_onshore_base_s_{clusters}.geojson"),
-        powerplants=ITERATION_RESOURCES + "y{year}/powerplants_adjusted_s_{clusters}.csv",  # REMIND specific
+        powerplants=ITERATION_RESOURCES + "y{year_REMIND}/powerplants_adjusted_s_{clusters}.csv",  # REMIND specific
         hydro_capacities=ancient("data/hydro_capacities.csv"),
         unit_commitment="data/unit_commitment.csv",
         fuel_price=lambda w: (
@@ -236,11 +239,11 @@ rule add_electricity_sector_REMIND:
         capacities=ITERATION_RESOURCES + "installed_capacities.csv",
         wh_share="data/REMIND_SSP2_wh_share.csv",  # REMIND share of water heating
     output:
-        ITERATION_RESOURCES + "y{year}/networks/base_s_{clusters}_elec.nc",
+        ITERATION_RESOURCES + "y{year_REMIND}/networks/base_s_{clusters}_elec.nc",
     log:
-        ITERATION_LOGS + "y{year}/add_electricity_{clusters}.log",
+        ITERATION_LOGS + "y{year_REMIND}/add_electricity_{clusters}.log",
     benchmark:
-        ITERATION_BENCHMARKS + "y{year}/add_electricity_{clusters}"
+        ITERATION_BENCHMARKS + "y{year_REMIND}/add_electricity_{clusters}"
     threads: 1
     group:
         "iy"
@@ -250,18 +253,18 @@ rule add_electricity_sector_REMIND:
         scripts("add_electricity_sector_REMIND.py")
 
 
-# Helper function to read CO2 prices from CSV to feed into prepare_network_REMIND
+# Helper function to read CO2 prices from CSV to feed into prepare_network_REMIND parameter without changing the script
 def _remind_emission_prices(wildcards, input):
     co2_path = rules.import_REMIND_co2price.output.co2_price.format(**wildcards)
     co2_prices = pd.read_csv(str(co2_path)).set_index("year")["co2_price"]
     return {
         "enable": True,
         "dynamic": False,
-        "co2": float(co2_prices.loc[int(wildcards.year)]),
+        "co2": float(co2_prices.loc[int(wildcards.year_REMIND)]),
     }
 
 
-# This rule prepares the network, adding the CO2 price from the csv
+# Prepare network, specifically adding the CO2 price
 rule prepare_network_REMIND:
     message:
         "Preparing network for model with {wildcards.clusters} clusters and options {wildcards.opts}"
@@ -280,19 +283,19 @@ rule prepare_network_REMIND:
         drop_leap_day=config_provider("enable", "drop_leap_day"),
         transmission_limit=config_provider("electricity", "transmission_limit"),
     input:
-        ITERATION_RESOURCES + "y{year}/networks/base_s_{clusters}_elec.nc",
-        costs=ITERATION_RESOURCES + "y{year}/costs_processed.csv",  # REMIND specific
+        ITERATION_RESOURCES + "y{year_REMIND}/networks/base_s_{clusters}_elec.nc",
+        costs=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed.csv",  # REMIND specific
         co2_price=lambda w: (
             resources("co2_price.csv")
             if config_provider("costs", "emission_prices", "dynamic")(w)
             else []
         ),
     output:
-        ITERATION_RESOURCES + "y{year}/networks/base_s_{clusters}_elec_{opts}.nc",
+        ITERATION_RESOURCES + "y{year_REMIND}/networks/base_s_{clusters}_elec_{opts}.nc",
     log:
-        ITERATION_LOGS + "y{year}/prepare_network_base_s_{clusters}_elec_{opts}.log",
+        ITERATION_LOGS + "y{year_REMIND}/prepare_network_base_s_{clusters}_elec_{opts}.log",
     benchmark:
-        ITERATION_BENCHMARKS + "y{year}/prepare_network_base_s_{clusters}_elec_{opts}",
+        ITERATION_BENCHMARKS + "y{year_REMIND}/prepare_network_base_s_{clusters}_elec_{opts}",
     threads: 1
     group:
         "iy"
@@ -302,7 +305,40 @@ rule prepare_network_REMIND:
         scripts("prepare_network.py")
 
 
-# RULE SOLVE NETWORK
+# Setup ssh tunnel to login node if configured to run on PIK HPC
+USE_GUROBI_TUNNEL_REMIND = config.get("solving", {}).get("gurobi_hpc_tunnel", {}).get(
+    "use_tunnel", False
+)
+GUROBI_TUNNEL_READY_MARKER_REMIND = (
+    ITERATION_RESULTS
+    + "y{year_REMIND}/logs/solve_network/base_s_{clusters}_elec_{opts}_gurobi_tunnel_ready.txt"
+)
+
+if USE_GUROBI_TUNNEL_REMIND:
+    rule setup_gurobi_tunnel_REMIND:
+        message:
+            "Setting up Gurobi tunnel before solving {wildcards.clusters} clusters and {wildcards.opts} options"
+        output:
+            ready_marker=GUROBI_TUNNEL_READY_MARKER_REMIND,
+        log:
+            python=ITERATION_RESULTS
+            + "y{year_REMIND}/logs/solve_network/base_s_{clusters}_elec_{opts}_gurobi_tunnel_python.log",
+        benchmark:
+            ITERATION_RESULTS
+            + "y{year_REMIND}/benchmarks/solve_network/base_s_{clusters}_elec_{opts}_gurobi_tunnel",
+        threads: 1
+        group:
+            "iy"
+        resources:
+            mem_mb=500,
+            runtime="00:05:00",
+        script:
+            scripts("setup_gurobi_tunnel_REMIND.py")
+
+
+# Solve network for given scenario, iteration and year.
+# Additional constraint on capacities per region is passed via custom_extra_functionality,
+# which requires further input files from REMIND
 rule solve_network_REMIND:
     message:
         "Solving electricity network optimization for {wildcards.clusters} clusters and {wildcards.opts} electric options"
@@ -312,25 +348,31 @@ rule solve_network_REMIND:
         co2_sequestration_potential=config_provider(
             "sector", "co2_sequestration_potential", default=200
         ),
-        custom_extra_functionality=input_custom_extra_functionality,
+        custom_extra_functionality=input_custom_extra_functionality,  # REMIND-specific path provided in config
     input:
-        network=ITERATION_RESOURCES + "y{year}/networks/base_s_{clusters}_elec_{opts}.nc",
+        network=ITERATION_RESOURCES + "y{year_REMIND}/networks/base_s_{clusters}_elec_{opts}.nc",
+        # REMIND input files for capacity constraint
+        capacities=ITERATION_RESOURCES + "installed_capacities.csv",
+        region_mapping="config/regionmapping_21_EU11.csv",
+        technology_cost_mapping="config/technology_cost_mapping.csv",
+        # Optional marker to wait for Gurobi tunnel to be ready if configured
+        tunnel_ready=(GUROBI_TUNNEL_READY_MARKER_REMIND if USE_GUROBI_TUNNEL_REMIND else []),
     output:
-        network=ITERATION_RESULTS + "y{year}/networks/base_s_{clusters}_elec_{opts}.nc",
-        config=ITERATION_RESULTS + "y{year}/configs/config.base_s_{clusters}_elec_{opts}.yaml",
+        network=ITERATION_RESULTS + "y{year_REMIND}/networks/base_s_{clusters}_elec_{opts}.nc",
+        config=ITERATION_RESULTS + "y{year_REMIND}/configs/config.base_s_{clusters}_elec_{opts}.yaml",
         model=(
-            ITERATION_RESULTS + "y{year}/models/base_s_{clusters}_elec_{opts}.nc"
+            ITERATION_RESULTS + "y{year_REMIND}/models/base_s_{clusters}_elec_{opts}.nc"
             if config["solving"]["options"]["store_model"]
             else []
         ),
     log:
         solver=normpath(
-            ITERATION_RESULTS + "y{year}/logs/solve_network/base_s_{clusters}_elec_{opts}_solver.log"
+            ITERATION_RESULTS + "y{year_REMIND}/logs/solve_network/base_s_{clusters}_elec_{opts}_solver.log"
         ),
-        memory=ITERATION_RESULTS + "y{year}/logs/solve_network/base_s_{clusters}_elec_{opts}_memory.log",
-        python=ITERATION_RESULTS + "y{year}/logs/solve_network/base_s_{clusters}_elec_{opts}_python.log",
+        memory=ITERATION_RESULTS + "y{year_REMIND}/logs/solve_network/base_s_{clusters}_elec_{opts}_memory.log",
+        python=ITERATION_RESULTS + "y{year_REMIND}/logs/solve_network/base_s_{clusters}_elec_{opts}_python.log",
     benchmark:
-        (ITERATION_RESULTS + "y{year}/benchmarks/solve_network/base_s_{clusters}_elec_{opts}")
+        (ITERATION_RESULTS + "y{year_REMIND}/benchmarks/solve_network/base_s_{clusters}_elec_{opts}")
     threads: solver_threads
     group:
         "iy"
@@ -343,31 +385,30 @@ rule solve_network_REMIND:
         scripts("solve_network.py")
 
 
-# TODO: UPDATE
+# Expand rule to solve all networks across years.
 rule solve_all_networks_REMIND:
     input:
         networks=lambda wildcards: expand(
-            ITERATION_RESULTS
-            + "y{year}/networks/base_s_{clusters}_elec_{opts}.nc",
-            zip,
-            **pd.read_csv(
-                checkpoints.import_REMIND_config.get(
-                    scenario=wildcards["scenario"],
-                    iteration=wildcards["iteration"],
-                ).output["scenario_wildcards"],
-                na_filter=False,
-            ).to_dict(orient="list")
+            ITERATION_RESULTS + "y{year_REMIND}/networks/base_s_{clusters}_elec_{opts}.nc",
+            scen_REMIND=[wildcards.scen_REMIND],  # Given by output path in export_to_REMIND
+            iter_REMIND=[wildcards.iter_REMIND],  # Given by output path in export_to_REMIND
+            clusters=config["scenario"]["clusters"],  # Given by config
+            opts=[""],  # Empty because CO2 price is inserted in prepare_network_REMIND
+            year_REMIND=[2030, 2035, 2040, 2045, 2050],  # TODO: Update with import_config_REMIND
         ),
+    output:
+        # Marker file to call rule and populate wildcards if needed
+        # snakemake -s Snakefile_REMIND results/{scen_REMIND}/i{iter_REMIND}/y{year_REMIND}/solve_all_networks_REMIND.done
+        touch(ITERATION_RESULTS + "solve_all_networks_REMIND.done")
 
 
 # Export PyPSA-Eur results to REMIND as GDX and create additional reporting CSVs
+# TODO: Refactor completely
 rule export_to_REMIND:
     params:
         remind_settings=config_provider("remind_coupling"),
     input:
-        # For standard capacity expansion, require all networks
         networks=rules.solve_all_networks_REMIND.input["networks"],
-        # Region and technology mappings
         region_mapping="config/regionmapping_21_EU11.csv",
         technology_cost_mapping="config/technology_cost_mapping.csv",
         # Provide gdx to downscale PyPSA results to REMIND technologies

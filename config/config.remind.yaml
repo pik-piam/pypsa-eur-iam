@@ -114,7 +114,7 @@ foresight: overnight
 scenario:
   clusters:
   - 4  # REMIND coupling specific
-  opts:  # REMIND coupling specific
+  opts:
   - '3H' # REMIND coupling specific
   year: [2025, 2030, 2035, 2040, 2045, 2050, 2055, 2060, 2070, 2080, 2090, 2100, 2110, 2130, 2150]
   sector_opts:
@@ -1169,7 +1169,7 @@ solving:
     skip_iterations: true
     rolling_horizon: false
     seed: 123
-    custom_extra_functionality: ../data/custom_extra_functionality.py
+    custom_extra_functionality: ../scripts/remind_extra_constraints.py  # REMIND specific
     io_api:
     track_iterations: false
     min_iterations: 2

@@ -155,7 +155,7 @@ def attach_sector_coupling_remind(
             snakemake.input.wh_share,
             snakemake.input.hourly_heat_demand_total,
             snakemake.input.hourly_water_heat_demand_total,
-            int(snakemake.wildcards.year),
+            int(snakemake.wildcards.year_REMIND),
             kind="heatpump",
             cop_profiles_fn=snakemake.input.cop_profiles,
         )
@@ -168,7 +168,7 @@ def attach_sector_coupling_remind(
             snakemake.input.wh_share,
             snakemake.input.hourly_heat_demand_total,
             snakemake.input.hourly_water_heat_demand_total,
-            int(snakemake.wildcards.year),
+            int(snakemake.wildcards.year_REMIND),
             kind="resistive",
         )
 
@@ -752,7 +752,7 @@ if __name__ == "__main__":
 
     params = snakemake.params
     max_hours = params.electricity["max_hours"]
-    year = int(snakemake.wildcards.year)
+    year = int(snakemake.wildcards.year_REMIND)
     landfall_lengths = {
         tech: settings["landfall_length"]
         for tech, settings in params.renewable.items()

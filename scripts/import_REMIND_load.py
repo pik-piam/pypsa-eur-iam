@@ -49,7 +49,7 @@ if __name__ == "__main__":
             "loadPy32": "sector",
             "level": "value",
         },
-    ).query("year == @snakemake.wildcards.year")
+    ).query("year == @snakemake.wildcards.year_REMIND")
     # Convert TWa to MWh and assign units
     demand_sector["value"] *= 1e6 * 8760
     demand_sector["unit"] = "MWh_el"
@@ -71,7 +71,7 @@ if __name__ == "__main__":
                 "all_te": "technology",
                 "value": "eta",
             },
-        ).query("year == @snakemake.wildcards.year & technology == 'elh2'")
+        ).query("year == @snakemake.wildcards.year_REMIND & technology == 'elh2'")
         h2_demand = demand_sector.query("sector == 'electrolysis'").merge(eta)
         h2_demand["value"] *= h2_demand["eta"]
         mask = demand_sector["sector"] == "electrolysis"
