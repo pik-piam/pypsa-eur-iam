@@ -22,52 +22,50 @@ remind_coupling:
   battery_storage:
     e_min_pu: 0.15
   sector_coupling:
+    # Demand for electrolytic hydrogen
     electrolysis:
-      # Add load for electrolytic hydrogen
       enable: true
+      # TODO: Add key for distribution across nodes?
       # Minimum partial load
       p_min_pu: 0.1
       # Ramping limit
       ramp_limit: NaN
+    # Add electricity demand for passenger EVs
     EV_pass:
-      # Add load for EV passenger
-      enable: false
-      annual_consumption: 3
-      charge_rate: 0.011
-      share_charger: 0.8
+      enable: true
+      # Estimate fleet size if EDGE-T didn't run yet
+      annual_consumption: 4  # MWh/year
+      charge_rate: 0.011  # MW, 11 kW
+      share_charger: 0.8  # Number of chargers per EV
+      # DSM settings
       dsm: false
-      battery_size: 0.06
+      battery_size: 0.06  # MWh, 60 kWh
       dsm_availability: 0.5
+    # Add load for EV freight (currently not used)
     EV_freight:
-      # Add load for EV freight (currently not used)
       enable: false
-      annual_consumption: 40
-      charge_rate: 0.15
-      share_charger: 0.1
+      # Estimate fleet size if EDGE-T didn't run yet
+      annual_consumption: 40  # MWh/year
+      charge_rate: 0.15  # MW, 150 kW
+      share_charger: 0.1  # Number of chargers per e-truck
+      # DSM settings
       dsm: false
-      battery_size: 0.3
+      battery_size: 0.3  # MWh, 300 kWh
       dsm_availability: 0.5
+    # Add load for heat pumps
     heatpump:
-      # Add load for heat pumps
-      enable: false
-      avg_power: 0.002
-      hours_used: 2000
+      enable: true
+      # Flexibility settings
       dsm: false
-      tank_delT: 40
-      tank_size: 200
-      tank_share: 0.9
-      dsm_availability: 0.5
+      ep_ratio: 3  # hours, E/P relative to peak load
+    # Add load for resistive heating
     resistive:
-      # Add load for resistive heating
-      enable: false
-      avg_power: 0.006
-      hours_used: 500
+      enable: true
+      # Flexibility settings
       dsm: false
-      tank_delT: 40
-      tank_size: 200
-      tank_share: 0.1
-      dsm_availability: 0.5
+      ep_ratio: 2  # hours, E/P relative to peak load
   export_to_REMIND:
+    # Cut off scarcity prices above z-score
     z_cutoff: 3
 
 run:

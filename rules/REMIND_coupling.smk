@@ -174,6 +174,15 @@ rule build_hourly_water_heat_demand_REMIND:
     script:
         "../scripts/build_hourly_water_heat_demand_REMIND.py"
 
+# Helper function for optional EDGE-T fleet file
+def _get_fleet_input(wildcards):
+    fleet_path = f"resources/{wildcards.scen_REMIND}/i{wildcards.iter_REMIND}/fleetVehiclesPerTech.RDS"
+    exists = os.path.exists(fleet_path)
+    if exists:
+        return fleet_path
+    else:
+        return []
+
 # This is the main rule that brings all REMIND inputs together and creates the electricity network for the given scenario, iteration and year.
 # TODO: Revert to default add_electricity and use this rule to overwrite afterwards?
 rule add_electricity_sector_REMIND:
@@ -196,6 +205,7 @@ rule add_electricity_sector_REMIND:
         ),
         aggregation_strategies=config_provider("clustering", "aggregation_strategies"),
         exclude_carriers=config_provider("clustering", "exclude_carriers"),
+        sector=config_provider("sector"),
         # REMIND parameters
         preinstalled_capacities=config_provider("remind_coupling","preinstalled_capacities"),
         h2_settings=config_provider("remind_coupling", "hydrogen_storage"),
@@ -227,6 +237,7 @@ rule add_electricity_sector_REMIND:
         transport_data=resources("transport_data_s_{clusters}.csv"),
         avail_profile=resources("avail_profile_s_{clusters}.csv"),
         dsm_profile=resources("dsm_profile_s_{clusters}.csv"),
+        temp_air_total=resources("temp_air_total_base_s_{clusters}.nc"),
         # Heating input files
         hourly_heat_demand_total=resources("hourly_heat_demand_total_base_s_{clusters}.nc"),
         cop_profiles=resources("cop_profiles_base_s_{clusters}_2030.nc"),  # Use arbitrary planning_horizons wildcard
@@ -238,6 +249,7 @@ rule add_electricity_sector_REMIND:
         hydro_targets=ITERATION_RESOURCES + "hydro_targets.csv",
         capacities=ITERATION_RESOURCES + "installed_capacities.csv",
         wh_share="data/REMIND_SSP2_wh_share.csv",  # REMIND share of water heating
+        fleet_file=_get_fleet_input,  # EDGE-T fleet
     output:
         ITERATION_RESOURCES + "y{year_REMIND}/networks/base_s_{clusters}_elec.nc",
     log:

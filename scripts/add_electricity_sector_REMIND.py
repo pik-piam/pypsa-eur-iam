@@ -41,6 +41,7 @@ from scripts.add_electricity import (
     update_p_nom_max,
 )
 from scripts._helpers import get_region_mapping
+from scripts.build_transport_demand import transport_degree_factor
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +129,15 @@ def attach_sector_coupling_remind(
             n,
             sectoral_load,
             settings["EV_pass"],
+            snakemake.params["sector"],
             snakemake.input.transport_demand,
             snakemake.input.transport_data,
             snakemake.input.avail_profile,
             snakemake.input.dsm_profile,
+            snakemake.input.temp_air_total,
+            snakemake.input.fleet_file,
+            snakemake.input.region_mapping,
+            int(snakemake.wildcards.year_REMIND),
             kind="pass",
         )
 
@@ -140,10 +146,15 @@ def attach_sector_coupling_remind(
             n,
             sectoral_load,
             settings["EV_freight"],
+            snakemake.params["sector"],
             snakemake.input.transport_demand,
             snakemake.input.transport_data,
             snakemake.input.avail_profile,
             snakemake.input.dsm_profile,
+            snakemake.input.temp_air_total,
+            snakemake.input.fleet_file,
+            snakemake.input.region_mapping,
+            int(snakemake.wildcards.year_REMIND),
             kind="freight",
         )
 
@@ -192,6 +203,80 @@ def _get_country_to_region(region_mapping_fn: str) -> pd.Series:
         target="REMIND-EU",
     )
     return pd.Series(mapping).map(_to_scalar_region)
+
+
+def _optional_input_path(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return None
+        value = value[0]
+    path = str(value)
+    return path if path else None
+
+
+def _fleet_evs_by_node_from_rds(
+    n: pypsa.Network,
+    fleet_file: str,
+    region_mapping_fn: str,
+    number_cars: pd.Series,
+    year: int,
+    kind: str,
+) -> pd.Series | None:
+    try:
+        import pyreadr
+    except ImportError as exc:
+        raise ModuleNotFoundError(
+            "pyreadr is required to read fleetVehiclesPerTech.RDS but is not available."
+        ) from exc
+
+    subsector_map = {
+        "pass": "trn_pass_road_LDV",
+        "freight": "trn_freight_road_tmp_subsectorL2",
+    }
+
+    rds = pyreadr.read_r(fleet_file)
+    fleet = next((v for v in rds.values() if isinstance(v, pd.DataFrame)), None)
+    if fleet is None or fleet.empty:
+        return None
+
+    required = {"period", "region", "technology", "subsectorL2", "totVeh"}
+    if not required.issubset(fleet.columns):
+        logger.warning("Fleet RDS file is missing required columns %s; using fallback fleet estimate.", required)
+        return None
+
+    period = pd.to_numeric(fleet["period"], errors="coerce")
+    tot_veh = pd.to_numeric(fleet["totVeh"], errors="coerce")
+    rows = fleet[
+        period.eq(int(year))
+        & fleet["technology"].eq("BEV")
+        & fleet["subsectorL2"].eq(subsector_map[kind])
+        & tot_veh.notna()
+    ].copy()
+    if rows.empty:
+        return None
+
+    country_to_region = _get_country_to_region(region_mapping_fn)
+    node_country = n.buses["country"].reindex(number_cars.index)
+    node_region = node_country.map(country_to_region)
+
+    number_evs = pd.Series(0.0, index=number_cars.index)
+    found_any_region = False
+    for _, row in rows.iterrows():
+        region = _to_scalar_region(row["region"])
+        if pd.isna(region):
+            continue
+        region_nodes = number_evs.index[node_region.eq(region)]
+        if len(region_nodes) == 0:
+            continue
+        weights = _normalize_weights(number_cars.reindex(region_nodes).fillna(0.0))
+        number_evs.loc[region_nodes] += weights * (float(row["totVeh"]) * 1e6)
+        found_any_region = True
+
+    if not found_any_region or number_evs.sum() <= 0:
+        return None
+    return number_evs
 
 
 def attach_hydrogen_demand_remind(
@@ -260,10 +345,15 @@ def attach_ev_demand_remind(
     n: pypsa.Network,
     sectoral_load: pd.DataFrame,
     options_ev: dict,
+    options_sector: dict,
     transport_demand_fn: str,
     transport_data_fn: str,
     avail_profile_fn: str,
     dsm_profile_fn: str,
+    temp_air_total_fn: str,
+    fleet_file: str | list,
+    region_mapping_fn: str,
+    year: int,
     kind: str,
 ) -> None:
     if kind not in ("pass", "freight"):
@@ -284,6 +374,22 @@ def attach_ev_demand_remind(
         return
     transport = transport[common_cols].fillna(0.0)
 
+    temperature = xr.open_dataarray(temp_air_total_fn).to_pandas()
+    temperature = (
+        temperature.reindex(index=n.snapshots, columns=common_cols)
+        .ffill()
+        .bfill()
+        .fillna(15.0)
+    )
+    dd = transport_degree_factor(
+        temperature,
+        options_sector["transport_heating_deadband_lower"],
+        options_sector["transport_heating_deadband_upper"],
+        options_sector["EV_lower_degree_factor"],
+        options_sector["EV_upper_degree_factor"],
+    )
+    transport = transport.mul(1 + dd, axis=0)
+
     denom = transport.to_numpy().sum()
     if denom <= 0:
         logger.warning("EV transport profile sum is zero; skipping %s.", sector)
@@ -293,8 +399,26 @@ def attach_ev_demand_remind(
     transport_data = pd.read_csv(transport_data_fn, index_col=0)
     number_cars = transport_data["number cars"].reindex(common_cols).fillna(0.0)
     car_weights = _normalize_weights(number_cars)
-    number_evs_total = float(demand_mwh) / float(options_ev["annual_consumption"])
-    number_evs = car_weights * number_evs_total
+
+    fleet_file_path = _optional_input_path(fleet_file)
+    number_evs = None
+    if fleet_file_path:
+        number_evs = _fleet_evs_by_node_from_rds(
+            n,
+            fleet_file_path,
+            region_mapping_fn,
+            number_cars,
+            year,
+            kind,
+        )
+        if number_evs is not None:
+            number_evs = number_evs.reindex(common_cols).fillna(0.0)
+            logger.info("Using EV fleet from %s for %s.", fleet_file_path, sector)
+
+    if number_evs is None:
+        number_evs_total = float(demand_mwh) / float(options_ev["annual_consumption"])
+        number_evs = car_weights * number_evs_total
+        logger.info("Using config-based EV fleet fallback for %s.", sector)
 
     charge_power = number_evs * float(options_ev["charge_rate"]) * float(options_ev["share_charger"])
     link_p_nom = charge_power * float(options_ev["dsm_availability"])
@@ -421,7 +545,7 @@ def attach_heat_demand_remind(
 
     space_heat = space_heat * (elec_space / space_sum)
     water_heat = water_heat * (elec_water / water_sum)
-    total_heat = space_heat + water_heat
+    total_elec_profile = space_heat + water_heat
 
     carrier = f"{kind} electricity"
     heat_nodes = spatial_nodes + f" {carrier}"
@@ -441,10 +565,10 @@ def attach_heat_demand_remind(
         suffix=f" {carrier}",
         bus=heat_nodes,
         carrier=carrier,
-        p_set=total_heat,
+        p_set=total_elec_profile,
     )
 
-    p_nom_max = total_heat.max(axis=0)
+    p_nom_max = total_elec_profile.max(axis=0)
     n.add(
         "Link",
         spatial_nodes,
@@ -460,25 +584,20 @@ def attach_heat_demand_remind(
     )
 
     if options_heat["dsm"]:
-        number_units = float(demand_mwh) / float(options_heat["avg_power"]) / float(options_heat["hours_used"])
-        spec_heat_cap_water = 4.18
-        kj2mwh = 1 / 3.6e6
-        thermal_storage = (
-            number_units
-            * float(options_heat["tank_size"])
-            * float(options_heat["tank_share"])
-            * spec_heat_cap_water
-            * float(options_heat["tank_delT"])
-            * kj2mwh
-        )
-        thermal_storage_spatial = _normalize_weights(space_heat.sum(axis=0)) * thermal_storage
+        ep_ratio = float(options_heat["ep_ratio"])
 
         if kind == "heatpump":
-            elec_storage = thermal_storage_spatial / cop.max(axis=0).clip(lower=1e-6)
-            size_store = elec_storage
-            max_pu_store = 1.0
+            total_heat_profile = total_elec_profile * cop
+            p_therm_max = total_heat_profile.max(axis=0).fillna(0.0)
+            e_therm = p_therm_max * ep_ratio
+
+            cop_safe = cop.clip(lower=1e-6)
+            elec_storage = e_therm / cop_safe
+            size_store = elec_storage.max(axis=0).fillna(0.0)
+            max_pu_store = (elec_storage / size_store.replace(0.0, np.nan)).fillna(0.0)
         else:
-            size_store = thermal_storage_spatial
+            p_therm_max = total_elec_profile.max(axis=0).fillna(0.0)
+            size_store = p_therm_max * ep_ratio
             max_pu_store = 1.0
 
         n.add(
@@ -488,10 +607,17 @@ def attach_heat_demand_remind(
             bus=heat_nodes,
             carrier=f"{kind} storage",
             e_cyclic=True,
-            e_nom=size_store * float(options_heat["dsm_availability"]),
+            e_nom=size_store,
             e_nom_extendable=False,
             e_max_pu=max_pu_store,
             e_min_pu=0.0,
+        )
+
+        logger.info(
+            "Attached %s DSM store with fixed E/P ratio %.2f h (total e_nom=%.2f MWh_el).",
+            kind,
+            ep_ratio,
+            float(pd.Series(size_store).sum()),
         )
 
     logger.info("Attached REMIND %s demand (%.2f MWh).", kind, float(demand_mwh))
