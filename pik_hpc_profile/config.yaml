@@ -55,76 +55,19 @@ default-resources:
   mem_mb: 1000
   cores: 8
 
-set-resources:
-  download_and_prepare:
-    partition: "io"
-    qos: "io"
-  retrieve_cost_data:
-    partition: "io"
-    qos: "io"
-  retrieve_cutout:
-    partition: "io"
-    qos: "io"
-  retrieve_databundle:
-    partition: "io"
-    qos: "io"
-  retrieve_eez:
-    partition: "io"
-    qos: "io"
-  retrieve_electricity_demand:
-    partition: "io"
-    qos: "io"
-  retrieve_naturalearth_countries:
-    partition: "io"
-    qos: "io"
-  retrieve_nuts_shapes:
-    partition: "io"
-    qos: "io"
-  retrieve_osm_prebuilt:
-    partition: "io"
-    qos: "io"
-  retrieve_ship_raster:
-    partition: "io"
-    qos: "io"
-  rertieve_synthetic_electricity_demand:
-    partition: "io"
-    qos: "io"
-  retrieve_powerplants:
-    partition: "io"
-    qos: "io"
-  build_renewable_profiles:
-    walltime: "'00:60:00'"
-  extract_coupling_parameters:
-    parition: "priority"
-    qos: "standby"
-  # Due to group-components aggregating mem_mb resources,
-  # the high default requests for mem_mb of these will exceed permitted memory requests in queue
-  # but that much memory is currently not needed for small PyPSA-Eur models, so we overwrite the values here
-  # add_electricity:
-  #   mem_mb: 10000
-  #   threads: 4
-  # simplify_network:
-  #   mem_mb: 10000
-  #   threads: 4
-  # cluster_network:
-  #   mem_mb: 10000
-  #   threads: 4
-  # prepare_network:
-  #   mem_mb: 10000
-  #   threads: 4
-
-# Additional job grouping using snakemake --group for "io" partition/qos
-# permitting only 2 jobs submitted at a time per user; by grouping all
-# rules requiring to run on "io" partiaion/qos, we achieve only 2 submitted jobs
-groups:
-- download_and_prepare=download_data
-- retrieve_cost_data=download_data
-- retrieve_cutout=download_data
-- retrieve_databundle=download_data
-- retrieve_eez=download_data
-- retrieve_electricity_demand=download_data
-- retrieve_naturalearth_countries=download_data
-- retrieve_nuts_shapes=download_data
-- retrieve_osm_prebuilt=download_data
-- retrieve_ship_raster=download_data
-- rertieve_synthetic_electricity_demand=download_data
+# set-resources:
+#   # Due to group-components aggregating mem_mb resources,
+#   # the high default requests for mem_mb of these will exceed permitted memory requests in queue
+#   # but that much memory is currently not needed for small PyPSA-Eur models, so we overwrite the values here
+#   add_electricity:
+#     mem_mb: 10000
+#     threads: 4
+#   simplify_network:
+#     mem_mb: 10000
+#     threads: 4
+#   cluster_network:
+#     mem_mb: 10000
+#     threads: 4
+#   prepare_network:
+#     mem_mb: 10000
+#     threads: 4
