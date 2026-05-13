@@ -120,45 +120,62 @@ countries:
   - DE
 
 electricity:
+  # Additional technologies introduced to match REMIND
   extendable_carriers:
-    # TODO: Review solar-hsat, biomass
+    # TODO: Review solar-hsat, waste, geothermal
     Generator:
       - solar
       - onwind
       - offwind-ac
-      - offwind-dc
-      - OCGT
+      - ocgt
+      - ccgt
+      - ccgt-ccs
+      - gas-chp
       - nuclear
       - oil
-      - CCGT
-      - coal
-      - lignite
+      - coal-pc
+      - coal-igcc
+      - coal-igcc-ccs
+      - coal-chp
+      - biomass-chp
+      - biomass-igcc
+      - biomass-igcc-ccs
   # Powerplants are filtered in adjust_powerplants_REMIND
   powerplants_filter: false
-  # Add powerplants at all locations
+  # Add powerplants at all locations (p_nom=0; for technologies with no existing plants)
   everywhere_powerplants:
-    - OCGT
+    - ocgt
     - nuclear
     - oil
-    - CCGT
-    - coal
-    - lignite
-    - biomass
-  # TODO: What about waste and geothermal?
+    - ccgt
+    - gas-chp
+    - ccgt-ccs
+    - coal-pc
+    - coal-igcc
+    - coal-igcc-ccs
+    - coal-chp
+    - biomass-chp
+    - biomass-igcc
+    - biomass-igcc-ccs
   conventional_carriers:
-    - OCGT
+    - ocgt
+    - ccgt
+    - ccgt-ccs
+    - gas-chp
     - nuclear
     - oil
-    - CCGT
-    - coal
-    - lignite
-    - biomass
+    - coal-pc
+    - coal-igcc
+    - coal-igcc-ccs
+    - coal-chp
+    - biomass-chp
+    - biomass-igcc
+    - biomass-igcc-ccs
   # TODO: What about solar-hsat?
   renewable_carriers:
     - solar
     - onwind
     - offwind-ac
-    - offwind-dc
     - hydro
   # Don't estimate renewable capacities for now
   estimate_renewable_capacities:
@@ -167,9 +184,9 @@ electricity:
 # Adjust potentials to match REMIND
 renewable:
   offwind-ac:
-    capacity_per_sqkm: 5.6
-  offwind-dc:
-    capacity_per_sqkm: 5.6
+    # REMIND uses a single offshore wind technology covering all offshore areas.
+    # Value doubled to prior value (5.6) to account for the consolidated offwind-ac+offwind-dc potential.
+    capacity_per_sqkm: 11.2
   solar:
     capacity_per_sqkm: 21.5
 

@@ -15,8 +15,7 @@ rule download_and_prepare_REMIND:
             clusters=config["scenario"]["clusters"],
         )
 
-# This part contains all rules, which get data from REMIND between iterations.
-# New wildcards introduced in this part:
+# The following new wildcards are introduced for the coupling:
 # * {scen_REMIND}: REMIND scenario name
 # * {year_REMIND}: REMIND year
 # * {iter_REMIND}: REMIND iteration
@@ -29,8 +28,9 @@ rule download_and_prepare_REMIND:
 #       --config-changes-overrides "key=value; ..." \
 #       --output resources/{scen}/i{iter}/config.remind_scenario.yaml
 #
-# Then invoke Snakemake with:
+# Then start Snakemake with:
 #   snakemake -s Snakefile_REMIND --configfile resources/{scen}/i{iter}/config.remind_scenario.yaml ...
+
 
 # Input 1: Read demand data from REMIND and create a csv with the demand for each technology and region.
 rule import_REMIND_demand:
@@ -124,8 +124,7 @@ rule adjust_powerplants_REMIND:
         powerplants=resources("powerplants_s_{clusters}.csv"),
         capacities=ITERATION_RESOURCES + "installed_capacities.csv",
         region_mapping="config/regionmapping_21_EU11.csv",
-        # TODO
-        
+        technology_mapping="config/technology_cost_mapping.csv",
     output:
         powerplants_adjusted=SCENARIO_RESOURCES + "i{iter_REMIND}/y{year_REMIND}/powerplants_adjusted_s_{clusters}.csv",
     log:

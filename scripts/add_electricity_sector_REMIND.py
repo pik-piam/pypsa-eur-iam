@@ -46,6 +46,7 @@ from scripts.build_transport_demand import transport_degree_factor
 logger = logging.getLogger(__name__)
 
 def overwrite_ppl_efficiency_with_costs(ppl: pd.DataFrame, costs: pd.DataFrame) -> pd.DataFrame:
+    """Replace each plant's efficiency and marginal cost with the REMIND cost table value for its carrier."""
     ppl = ppl.copy()
     ppl["efficiency"] = ppl["carrier"].map(costs["efficiency"])
     ppl["marginal_cost"] = (
@@ -109,86 +110,9 @@ def calculate_load_scaling_factor(
     return scaling_factor
 
 
-def attach_sector_coupling_remind(
-    n: pypsa.Network,
-    snakemake: Any,
-    sectoral_load: pd.DataFrame,
-) -> None:
-    """Attach REMIND-driven sector demands after electricity base build."""
-    settings = snakemake.params["sector_coupling"]
-
-    if settings["electrolysis"]["enable"]:
-        attach_hydrogen_demand_remind(
-            n,
-            sectoral_load,
-            snakemake.input.region_mapping,
-        )
-
-    if settings["EV_pass"]["enable"]:
-        attach_ev_demand_remind(
-            n,
-            sectoral_load,
-            settings["EV_pass"],
-            snakemake.params["sector"],
-            snakemake.input.transport_demand,
-            snakemake.input.transport_data,
-            snakemake.input.avail_profile,
-            snakemake.input.dsm_profile,
-            snakemake.input.temp_air_total,
-            snakemake.input.fleet_file,
-            snakemake.input.region_mapping,
-            int(snakemake.wildcards.year_REMIND),
-            kind="pass",
-        )
-
-    if settings["EV_freight"]["enable"]:
-        attach_ev_demand_remind(
-            n,
-            sectoral_load,
-            settings["EV_freight"],
-            snakemake.params["sector"],
-            snakemake.input.transport_demand,
-            snakemake.input.transport_data,
-            snakemake.input.avail_profile,
-            snakemake.input.dsm_profile,
-            snakemake.input.temp_air_total,
-            snakemake.input.fleet_file,
-            snakemake.input.region_mapping,
-            int(snakemake.wildcards.year_REMIND),
-            kind="freight",
-        )
-
-    if settings["heatpump"]["enable"]:
-        attach_heat_demand_remind(
-            n,
-            sectoral_load,
-            settings["heatpump"],
-            snakemake.input.wh_share,
-            snakemake.input.hourly_heat_demand_total,
-            snakemake.input.hourly_water_heat_demand_total,
-            int(snakemake.wildcards.year_REMIND),
-            kind="heatpump",
-            cop_profiles_fn=snakemake.input.cop_profiles,
-        )
-
-    if settings["resistive"]["enable"]:
-        attach_heat_demand_remind(
-            n,
-            sectoral_load,
-            settings["resistive"],
-            snakemake.input.wh_share,
-            snakemake.input.hourly_heat_demand_total,
-            snakemake.input.hourly_water_heat_demand_total,
-            int(snakemake.wildcards.year_REMIND),
-            kind="resistive",
-        )
-
-
-def _read_timeseries_csv(path: str) -> pd.DataFrame:
-    return pd.read_csv(path, index_col=0, parse_dates=True)
-
 
 def _normalize_weights(s: pd.Series) -> pd.Series:
+    """Normalize a non-negative Series to sum to 1; return uniform weights if the total is zero."""
     s = s.astype(float).clip(lower=0.0)
     total = s.sum()
     if total <= 0:
@@ -197,6 +121,7 @@ def _normalize_weights(s: pd.Series) -> pd.Series:
 
 
 def _get_country_to_region(region_mapping_fn: str) -> pd.Series:
+    """Return a Series mapping PyPSA-EUR country codes to scalar REMIND-EU region labels."""
     mapping = get_region_mapping(
         region_mapping_fn,
         source="PyPSA-EUR",
@@ -206,6 +131,7 @@ def _get_country_to_region(region_mapping_fn: str) -> pd.Series:
 
 
 def _optional_input_path(value: Any) -> str | None:
+    """Coerce a snakemake input value (possibly None or a list) to a string path, or None if absent."""
     if value is None:
         return None
     if isinstance(value, (list, tuple)):
@@ -224,6 +150,11 @@ def _fleet_evs_by_node_from_rds(
     year: int,
     kind: str,
 ) -> pd.Series | None:
+    """Read BEV fleet sizes from an EDGE-T RDS file and distribute them to PyPSA nodes by REMIND region.
+
+    Returns None if the file is unavailable, missing required columns, or contains no data for the
+    requested year and vehicle kind.
+    """
     try:
         import pyreadr
     except ImportError as exc:
@@ -284,6 +215,8 @@ def attach_hydrogen_demand_remind(
     sectoral_load: pd.DataFrame,
     region_mapping_fn: str,
 ) -> None:
+    """Add a fixed H2 Load at each H2 bus, distributing the REMIND electrolysis demand
+    across buses within each region proportionally to the existing AC load."""
     h2_demand = (
         sectoral_load.query("sector == 'electrolysis'")
         .groupby("region", as_index=True)["value"]
@@ -336,6 +269,7 @@ def attach_hydrogen_demand_remind(
 
 
 def cycling_shift(df: pd.DataFrame, steps: int = 1) -> pd.DataFrame:
+    """Circularly shift all rows of a DataFrame by `steps` positions along the time axis."""
     shifted = df.copy()
     shifted.values[:] = shifted.reindex(index=np.roll(shifted.index, steps)).values
     return shifted
@@ -356,6 +290,13 @@ def attach_ev_demand_remind(
     year: int,
     kind: str,
 ) -> None:
+    """Add EV electricity demand, charging links, and optional DSM stores for passenger or freight vehicles.
+
+    The REMIND annual electricity total for the sector is scaled by a transport time series
+    (corrected for heating degree days) to get an hourly profile. Fleet size comes from
+    the EDGE-T RDS file if available, otherwise it is estimated from config parameters.
+    DSM components (charger link, battery store) are only added when dsm is enabled in config.
+    """
     if kind not in ("pass", "freight"):
         raise ValueError("kind must be 'pass' or 'freight'")
 
@@ -366,7 +307,7 @@ def attach_ev_demand_remind(
         return
 
     spatial_nodes = n.buses.query("carrier == 'AC'").index
-    transport = _read_timeseries_csv(transport_demand_fn)
+    transport = pd.read_csv(transport_demand_fn, index_col=0, parse_dates=True)
     transport = transport.reindex(index=n.snapshots)
     common_cols = [c for c in spatial_nodes if c in transport.columns]
     if not common_cols:
@@ -424,9 +365,9 @@ def attach_ev_demand_remind(
     link_p_nom = charge_power * float(options_ev["dsm_availability"])
     store_e_nom = number_evs * float(options_ev["battery_size"]) * float(options_ev["dsm_availability"])
 
-    avail = _read_timeseries_csv(avail_profile_fn).reindex(index=n.snapshots)
+    avail = pd.read_csv(avail_profile_fn, index_col=0, parse_dates=True).reindex(index=n.snapshots)
     avail = avail.reindex(columns=common_cols).fillna(1.0)
-    dsm = _read_timeseries_csv(dsm_profile_fn).reindex(index=n.snapshots)
+    dsm = pd.read_csv(dsm_profile_fn, index_col=0, parse_dates=True).reindex(index=n.snapshots)
     dsm = dsm.reindex(columns=common_cols).fillna(0.0)
 
     carrier_name = f"EV {kind} battery"
@@ -494,6 +435,13 @@ def attach_heat_demand_remind(
     kind: str,
     cop_profiles_fn: str | None = None,
 ) -> None:
+    """Add electric heat demand for heat pumps or resistive heaters, scaled to the REMIND annual total.
+
+    Space and water heating are split using the warm-water share from the wh_share file.
+    For heat pumps, the electricity profile is obtained by dividing the thermal profile by
+    the hourly COP (rural air-source). Optionally adds a fixed-size thermal storage buffer
+    for DSM with E/P ratio from config.
+    """
     if kind not in ("heatpump", "resistive"):
         raise ValueError("kind must be 'heatpump' or 'resistive'")
 
@@ -692,8 +640,7 @@ def attach_hydro_remind(
 
     hydro_targets = pd.read_csv(hydro_targets_fn)
     hydro_targets["year"] = hydro_targets["year"].astype(str)
-    year_str = str(year)
-    hydro_targets_year = hydro_targets.query("year == @year_str").copy()
+    hydro_targets_year = hydro_targets[hydro_targets["year"] == str(year)].copy()
 
     if hydro_targets_year.empty:
         logger.warning(
@@ -1013,7 +960,12 @@ if __name__ == "__main__":
         params.aggregation_strategies,
         params.exclude_carriers,
     )
-    
+
+    # load_and_aggregate_powerplants's carrier_dict maps "ccgt"→"CCGT" and "ocgt"→"OCGT"
+    # (uppercase). Fueltype values for all other REMIND carriers are pre-set in
+    # adjust_powerplants_REMIND.py and pass through to_pypsa_names() as-is (lowercase).
+    ppl["carrier"] = ppl["carrier"].replace({"CCGT": "ccgt", "OCGT": "ocgt"})
+
     # Overwrite plant-specific efficiencies with REMIND efficiencies
     ppl = overwrite_ppl_efficiency_with_costs(ppl, costs)
 
@@ -1056,9 +1008,19 @@ if __name__ == "__main__":
     else:
         fuel_price = None
 
+    # add_electricity.py's add_co2_emissions() splits carrier names on "-" to get the
+    # suptech prefix (e.g. "coal-PC" → "coal") and looks that up in the costs index.
+    # REMIND cost entries use full carrier names, so we add alias rows for each
+    # suptech prefix that is missing from the index.
+    costs_for_attach = costs.copy()
+    for carrier in list(costs.index):
+        suptech = carrier.split("-")[0]
+        if suptech not in costs_for_attach.index:
+            costs_for_attach.loc[suptech] = costs_for_attach.loc[carrier]
+
     attach_conventional_generators(
         n,
-        costs,
+        costs_for_attach,
         ppl,
         conventional_carriers,
         extendable_carriers,
@@ -1141,11 +1103,103 @@ if __name__ == "__main__":
     if params.electricity.get("estimate_battery_capacities", False):
         attach_existing_batteries(n, costs, ppl)
 
-    attach_sector_coupling_remind(n, snakemake, sectoral_load)
+    # Add sectors if configured
+    sector_coupling = snakemake.params["sector_coupling"]
+
+    if sector_coupling["electrolysis"]["enable"]:
+        attach_hydrogen_demand_remind(
+            n,
+            sectoral_load,
+            snakemake.input.region_mapping,
+        )
+
+    if sector_coupling["EV_pass"]["enable"]:
+        attach_ev_demand_remind(
+            n,
+            sectoral_load,
+            sector_coupling["EV_pass"],
+            snakemake.params["sector"],
+            snakemake.input.transport_demand,
+            snakemake.input.transport_data,
+            snakemake.input.avail_profile,
+            snakemake.input.dsm_profile,
+            snakemake.input.temp_air_total,
+            snakemake.input.fleet_file,
+            snakemake.input.region_mapping,
+            year,
+            kind="pass",
+        )
+
+    if sector_coupling["EV_freight"]["enable"]:
+        attach_ev_demand_remind(
+            n,
+            sectoral_load,
+            sector_coupling["EV_freight"],
+            snakemake.params["sector"],
+            snakemake.input.transport_demand,
+            snakemake.input.transport_data,
+            snakemake.input.avail_profile,
+            snakemake.input.dsm_profile,
+            snakemake.input.temp_air_total,
+            snakemake.input.fleet_file,
+            snakemake.input.region_mapping,
+            year,
+            kind="freight",
+        )
+
+    if sector_coupling["heatpump"]["enable"]:
+        attach_heat_demand_remind(
+            n,
+            sectoral_load,
+            sector_coupling["heatpump"],
+            snakemake.input.wh_share,
+            snakemake.input.hourly_heat_demand_total,
+            snakemake.input.hourly_water_heat_demand_total,
+            year,
+            kind="heatpump",
+            cop_profiles_fn=snakemake.input.cop_profiles,
+        )
+
+    if sector_coupling["resistive"]["enable"]:
+        attach_heat_demand_remind(
+            n,
+            sectoral_load,
+            sector_coupling["resistive"],
+            snakemake.input.wh_share,
+            snakemake.input.hourly_heat_demand_total,
+            snakemake.input.hourly_water_heat_demand_total,
+            year,
+            kind="resistive",
+        )
 
     sanitize_carriers(n, snakemake.config)
     if "location" in n.buses:
         sanitize_locations(n)
+
+    # Lowercase the carrier/class suffix of generator names (keep bus prefix as-is)
+    # and sort alphabetically. Example: "DE0 0 CCGT" → "DE0 0 ccgt".
+    buses = set(n.buses.index)
+    rename_map = {}
+    for name in n.generators.index:
+        for bus in buses:
+            if name.startswith(bus + " "):
+                rename_map[name] = bus + " " + name[len(bus) + 1:].lower()
+                break
+        else:
+            rename_map[name] = name
+    n.generators = n.generators.rename(index=rename_map).sort_index()
+    for attr, df in n.generators_t.items():
+        n.generators_t[attr] = df.rename(columns=rename_map).reindex(
+            sorted(df.rename(columns=rename_map).columns), axis=1
+        )
+
+    # add_co2_emissions() in add_electricity.py uses only the suptech prefix (first
+    # part before "-") to look up CO2 intensity, so all biomass carriers would
+    # inherit biomass-chp's value of 0.  Override with the full-name lookup so
+    # that biomass-igcc-ccs (negative CO2 intensity from BECCS) is set correctly.
+    for carrier in costs.index:
+        if carrier in n.carriers.index and not pd.isna(costs.at[carrier, "CO2 intensity"]):
+            n.carriers.at[carrier, "co2_emissions"] = costs.at[carrier, "CO2 intensity"]
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])

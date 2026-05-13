@@ -1,5 +1,17 @@
 # -*- coding: utf-8 -*-
 
+"""
+Read sectoral electricity demand from REMIND and export it for use in PyPSA-Eur.
+
+Reads the REMIND variable ``v32_load_sector`` (unit: TWa), converts it to annual
+MWh per (year, region, sector), and filters to REMIND regions that overlap with the
+configured PyPSA-Eur countries.
+
+Outputs
+-------
+- ``sectoral_load.csv``: long-format table with columns year, region, sector, value (MWh_el).
+"""
+
 import logging
 
 import pandas as pd

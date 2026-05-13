@@ -2,6 +2,15 @@
 #
 # SPDX-License-Identifier: MIT
 
+"""
+Establish a Gurobi license tunnel before the solve rule on HPC clusters.
+
+When the solver is ``gurobi`` and ``solving.gurobi_hpc_tunnel.use_tunnel`` is true,
+sets up an SSH tunnel to the Gurobi license server and verifies that the license is
+reachable. Writes a ready-marker file so the Snakemake rule can signal success to
+downstream rules.
+"""
+
 import logging
 import os
 import socket

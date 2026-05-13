@@ -1,5 +1,18 @@
 # -*- coding: utf-8 -*-
 
+"""
+Read installed-capacity targets from REMIND and export them for use as lower bounds in PyPSA-Eur.
+
+Reads the REMIND variable ``p32_capAvg`` (unit: TW -> converted to MW), adjusts
+link-like technologies (electrolysis, fuel cell, battery inverter) from output-capacity
+to input-capacity convention by dividing by efficiency, maps REMIND technology names to
+PyPSA-Eur carrier names via the technology mapping CSV, and filters to configured regions.
+
+Outputs
+-------
+- ``capacities.csv``: table with columns year, region_REMIND, carrier, p_nom_min (MW).
+"""
+
 import logging
 
 import pandas as pd
@@ -76,41 +89,42 @@ def adjust_link_capacities_to_input(
     return merged.drop(columns=["efficiency"])
 
 
-def map_to_pypsa_technology_groups(
+def map_to_pypsa_carriers(
     capacities: pd.DataFrame,
     fp_technology_mapping: str,
 ) -> pd.DataFrame:
-    """Map REMIND technologies to PyPSA technology groups and aggregate capacities."""
-    technology_mapping = get_technology_mapping(
-        fp_technology_mapping,
-        group_technologies=True,
+    """Map REMIND technologies to PyPSA-Eur carrier names (1:1)."""
+    technology_mapping = get_technology_mapping(fp_technology_mapping)
+    # Use only one row per REMIND-EU tech (hydro auto-adds ror; we keep only hydro here)
+    remind_to_carrier = (
+        technology_mapping[["REMIND-EU", "PyPSA-Eur"]]
+        .drop_duplicates(subset="REMIND-EU", keep="first")
     )
-    technology_mapping = technology_mapping[["REMIND-EU", "technology_group"]].drop_duplicates()
 
     mapped = capacities.merge(
-        technology_mapping,
+        remind_to_carrier,
         left_on="remind_technology",
         right_on="REMIND-EU",
         how="left",
     )
 
-    unmapped = mapped["technology_group"].isna().sum()
+    unmapped = mapped["PyPSA-Eur"].isna().sum()
     if unmapped > 0:
         logger.warning(
             "Dropping %s rows with unmapped REMIND technologies.",
             int(unmapped),
         )
 
-    mapped = mapped.dropna(subset=["technology_group"])
+    mapped = mapped.dropna(subset=["PyPSA-Eur"]).rename(columns={"PyPSA-Eur": "carrier"})
 
     grouped = (
-        mapped.groupby(["year", "region_REMIND", "technology_group"], as_index=False, observed=False)["value"]
+        mapped.groupby(["year", "region_REMIND", "carrier"], as_index=False, observed=False)["value"]
         .sum()
         .round(2)
     )
     grouped = grouped[grouped["value"] > 0].rename(columns={"value": "p_nom_min"})
 
-    return grouped.sort_values(["year", "region_REMIND", "technology_group"]).reset_index(drop=True)
+    return grouped.sort_values(["year", "region_REMIND", "carrier"]).reset_index(drop=True)
 
 
 def filter_to_modeled_regions(capacities: pd.DataFrame, fp_region_mapping: str) -> pd.DataFrame:
@@ -145,8 +159,8 @@ if __name__ == "__main__":
         snakemake.input["remind_data"],
     )
 
-    logger.info("Mapping REMIND technologies to PyPSA technology groups...")
-    capacities = map_to_pypsa_technology_groups(
+    logger.info("Mapping REMIND technologies to PyPSA carrier names...")
+    capacities = map_to_pypsa_carriers(
         capacities,
         snakemake.input["technology_cost_mapping"],
     )

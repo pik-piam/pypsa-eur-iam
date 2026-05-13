@@ -10,21 +10,6 @@ from _helpers import configure_logging, get_region_mapping, read_remind_data
 logger = logging.getLogger(__name__)
 
 
-def load_region_mapping(fp_region_mapping: str, countries: list[str]) -> pd.DataFrame:
-    region_mapping = (
-        pd.DataFrame.from_dict(
-            get_region_mapping(
-                fp_region_mapping,
-                source="PyPSA-EUR",
-                target="REMIND-EU",
-            )
-        )
-        .T.reset_index()
-        .rename(columns={"index": "PyPSA-EUR", 0: "REMIND-EU"})
-    )
-    return region_mapping.query("`PyPSA-EUR`.isin(@countries)")
-
-
 if __name__ == "__main__":
     if "snakemake" not in globals():
         from _helpers import mock_snakemake
@@ -39,7 +24,9 @@ if __name__ == "__main__":
     configure_logging(snakemake)
     logger.info("Building REMIND CO2 price pathway")
 
-    region_mapping = load_region_mapping(snakemake.input["region_mapping"], snakemake.config["countries"])
+    countries = set(snakemake.config["countries"])
+    full_mapping = get_region_mapping(snakemake.input["region_mapping"], source="PyPSA-EUR", target="REMIND-EU")
+    mapped_regions = {r for c, rs in full_mapping.items() if c in countries for r in rs if r}
 
     co2_price = read_remind_data(
         file_path=snakemake.input["remind_data"],
@@ -66,7 +53,7 @@ if __name__ == "__main__":
     # Calculate mean CO2 price across all regions overlapping between REMIND and PyPSA-EUR countries for each year
     # TODO: Implement regional prices in PyPSA!
     co2_price = (
-        co2_price.loc[co2_price["region"].isin(region_mapping["REMIND-EU"])]
+        co2_price.loc[co2_price["region"].isin(mapped_regions)]
         .groupby("year", observed=False)["value"]
         .mean()
     )

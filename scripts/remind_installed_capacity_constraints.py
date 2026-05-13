@@ -26,24 +26,28 @@ def _build_country_to_region_map(fp_region_mapping: str) -> pd.Series:
 
 
 def _build_carrier_to_technology_group_map(fp_technology_mapping: str) -> pd.Series:
-    mapping = get_technology_mapping(fp_technology_mapping, group_technologies=True)
-    mapping = mapping[["PyPSA-Eur", "technology_group"]].drop_duplicates()
-    carrier_to_group = (
-        mapping.groupby("PyPSA-Eur", observed=False)["technology_group"].first()
-    )
+    # With 1:1 mapping, each PyPSA carrier maps to itself as the target group.
+    # Build from a dict to guarantee unique keys.
+    mapping = get_technology_mapping(fp_technology_mapping)
+    carrier_to_group = {c: c for c in mapping["PyPSA-Eur"]}
 
-    # Manual mappings for carrier names that are handled outside the CSV mapping.
-    manual_mapping = {
+    # ror and hydro are summed together against REMIND's single "hydro" target
+    carrier_to_group["ror"] = "hydro"
+    # offwind-ac is the network carrier; REMIND capacity target is keyed on "offwind"
+    carrier_to_group["offwind-ac"] = "offwind"
+
+    # Manual mappings for Links/Stores whose network carrier names differ from
+    # the PyPSA-Eur technology names used in technology_cost_mapping.csv (and
+    # thus in installed_capacities.csv).
+    carrier_to_group.update({
         "H2 Electrolysis": "electrolysis",
         "H2 Fuel Cell": "fuel cell",
         "battery charger": "battery inverter",
-        "H2": "hydrogen storage underground",
+        "H2 Store": "hydrogen storage underground",
         "battery": "battery storage",
-    }
-    for carrier, group in manual_mapping.items():
-        carrier_to_group.loc[carrier] = group
+    })
 
-    return carrier_to_group
+    return pd.Series(carrier_to_group)
 
 
 def _build_component_group_labels(
@@ -66,7 +70,7 @@ def _prepare_targets(snakemake) -> pd.Series:
     capacities = pd.read_csv(snakemake.input["capacities"])
     year = int(snakemake.wildcards.year_REMIND)
 
-    required_columns = {"year", "region_REMIND", "technology_group", "p_nom_min"}
+    required_columns = {"year", "region_REMIND", "carrier", "p_nom_min"}
     missing_columns = required_columns.difference(capacities.columns)
     if missing_columns:
         raise ValueError(
@@ -79,7 +83,7 @@ def _prepare_targets(snakemake) -> pd.Series:
         logger.warning("No REMIND installed capacities for year %s. No constraints added.", year)
         return pd.Series(dtype=float)
 
-    targets = capacities.groupby(["region_REMIND", "technology_group"], observed=False)[
+    targets = capacities.groupby(["region_REMIND", "carrier"], observed=False)[
         "p_nom_min"
     ].sum()
     return targets[targets > 0]
@@ -111,13 +115,13 @@ def _add_component_lower_bound_constraints(
     labels = pd.DataFrame(
         {
             "region_REMIND": regions,
-            "technology_group": technology_groups,
+            "carrier": technology_groups,
         },
         index=component_df.index,
     )
 
     unmapped_carriers = component_df.loc[
-        labels["technology_group"].isna(), "carrier"
+        labels["carrier"].isna(), "carrier"
     ].dropna()
     if not unmapped_carriers.empty:
         logger.warning(
@@ -146,7 +150,7 @@ def _add_component_lower_bound_constraints(
     labels_ext = labels.loc[ext_idx]
     grouper = xr.DataArray(
         pd.MultiIndex.from_arrays(
-            [labels_ext["region_REMIND"], labels_ext["technology_group"]]
+            [labels_ext["region_REMIND"], labels_ext["carrier"]]
         ),
         dims=[n.model[variable_name].dims[0]],
     )
