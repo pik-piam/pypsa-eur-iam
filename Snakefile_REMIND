@@ -41,6 +41,11 @@ benchmarks = path_provider("benchmarks/", "", shared_resources, exclude_from_sha
 resources = path_provider("resources/", "", shared_resources, exclude_from_shared)
 scripts = script_path_provider(Path(workflow.snakefile).parent)
 
+# The following new wildcards are introduced for the coupling:
+# * {scen_REMIND}: REMIND scenario name
+# * {year_REMIND}: REMIND year
+# * {iter_REMIND}: REMIND iteration
+
 # REMIND coupling specific directories
 # Structure, e.g.: resources/{scen_REMIND}/i{iter_REMIND}/y{year_REMIND}/
 RDIR = "{scen_REMIND}/"

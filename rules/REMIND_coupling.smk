@@ -5,20 +5,17 @@
 # Additional rules required for REMIND coupling
 # Author: Adrian Odenweller (adrian.odenweller@pik-potsdam.de)
 
-# Download and prepare all files, which are independent of REMIND inputs
-# Requires internet connection on login node.
-# Call with snakemake -s Snakefile_REMIND -c 4 download_and_prepare_REMIND
+# Download and prepare all files, which are independent of REMIND inputs and
+# requre internet connection on login nodes. Configure Gurobi before running.
+#   export GRB_LICENSE_FILE=/p/projects/rd3mod/gurobi.lic
+#   snakemake -s Snakefile_REMIND --cores 4 download_and_prepare_REMIND --omit-from add_electricity
+# The --omit from flag makes sure that add_electricity isn't called
 rule download_and_prepare_REMIND:
     input:
         expand(
             rules.add_electricity.output[0],
             clusters=config["scenario"]["clusters"],
         )
-
-# The following new wildcards are introduced for the coupling:
-# * {scen_REMIND}: REMIND scenario name
-# * {year_REMIND}: REMIND year
-# * {iter_REMIND}: REMIND iteration
 
 # Before calling PyPSA-Eur the config file is created by import_REMIND_config.py
 #
