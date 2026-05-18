@@ -9,7 +9,7 @@ logging:
 # REMIND-specific settings
 remind_coupling:
   # Coupled years, set by import_REMIND_config.py from the tPy32 set in REMIND2PyPSAEUR.gdx
-  years: [2025, 2030, 2035, 2040, 2045, 2050, 2055, 2060, 2070, 2080, 2090, 2100, 2110, 2130, 2150]
+  years: [2030, 2035, 2040, 2045, 2050, 2055, 2060, 2070, 2080, 2090, 2100, 2110, 2130, 2150]
   # Enforce REMIND capacities via constraint in solve_network.py
   installed_capacities:
     generators: true
@@ -79,8 +79,6 @@ run:
 scenario:
   clusters:
     - 4
-  opts:
-    - 3H
   year:
     - 2025
     - 2030
@@ -185,8 +183,10 @@ electricity:
 renewable:
   offwind-ac:
     # REMIND uses a single offshore wind technology covering all offshore areas.
-    # Value doubled to prior value (5.6) to account for the consolidated offwind-ac+offwind-dc potential.
+    # capacity_per_sqkm increased to enable the potential required by REMIND.
+    # max_shore_distance removed (was 30 km): offwind-ac now represents all offshore, not just near-shore.
     capacity_per_sqkm: 11.2
+    max_shore_distance:
   solar:
     capacity_per_sqkm: 21.5
 
@@ -196,9 +196,13 @@ sector:
       # Ensure consistency with REMIND across all years
       relative_annual_temperature_reduction: 0
 
+clustering:
+  temporal:
+    resolution_elec: 3h
+
 solving:
   options:
-    load_shedding: 1
+    load_shedding: 1000  # EUR/MWh (default unit at bus)
     # Inject constraints for minimum capacities
     custom_extra_functionality: ../scripts/remind_extra_constraints.py
   gurobi_hpc_tunnel:
