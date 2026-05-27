@@ -420,4 +420,4 @@ rule export_to_REMIND:
         mem_mb=lambda wildcards, attempt: attempt * 30000,
         walltime="00:10:00",
     script:
-        scripts("export_to_REMIND_new.py")
+        scripts("export_to_REMIND.py")

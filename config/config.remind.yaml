@@ -24,7 +24,7 @@ remind_coupling:
   battery_storage:
     e_min_pu: 0.15
   sector_coupling:
-    # Demand for electrolytic hydrogen
+    # Add electricity demand for electrolytic hydrogen
     electrolysis:
       enable: true
       # TODO: Add key for distribution across nodes?
@@ -43,7 +43,7 @@ remind_coupling:
       dsm: false
       battery_size: 0.06  # MWh, 60 kWh
       dsm_availability: 0.5
-    # Add load for EV freight (currently not used)
+    # Add electricity demand for EV freight (currently not used)
     EV_freight:
       enable: false
       # Estimate fleet size if EDGE-T didn't run yet
@@ -54,13 +54,13 @@ remind_coupling:
       dsm: false
       battery_size: 0.3  # MWh, 300 kWh
       dsm_availability: 0.5
-    # Add load for heat pumps
+    # Add electricity demand for heat pumps
     heatpump:
       enable: true
       # Flexibility settings
       dsm: false
       ep_ratio: 3  # hours, E/P relative to peak load
-    # Add load for resistive heating
+    # Add electricity demand for resistive heating
     resistive:
       enable: true
       # Flexibility settings
