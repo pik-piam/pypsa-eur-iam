@@ -2,9 +2,10 @@
 """
 Read sectoral electricity demand from REMIND and export it for use in PyPSA-Eur.
 
-Reads the REMIND variable ``v32_load_sector`` (unit: TWa), converts it to annual
-MWh per (year, region, sector), and filters to REMIND regions that overlap with the
-configured PyPSA-Eur countries.
+Reads the REMIND variable ``v32_load_sector`` (unit: TWa), with fallback to the
+parameter ``p32_load_sector`` when the variable is unavailable (e.g. in fix runs).
+Converts to annual MWh per (year, region, sector) and filters to REMIND regions that
+overlap with the configured PyPSA-Eur countries.
 
 Outputs
 -------
@@ -36,16 +37,29 @@ if __name__ == "__main__":
     configure_logging(snakemake)
 
     logger.info("Loading REMIND demand data...")
-    demand = read_remind_data(
-        snakemake.input["remind_data"],
-        "v32_load_sector",
-        rename_columns={
-            "ttot": "year",
-            "all_regi": "region",
-            "loadPy32": "sector",
-            "level": "value",
-        },
-    )
+    try:
+        demand = read_remind_data(
+            snakemake.input["remind_data"],
+            "v32_load_sector",
+            rename_columns={
+                "ttot": "year",
+                "all_regi": "region",
+                "loadPy32": "sector",
+                "level": "value",
+            },
+        )
+        logger.info("Using v32_load_sector for demand data.")
+    except (KeyError, ValueError):
+        logger.info("v32_load_sector not found or empty — falling back to p32_load_sector.")
+        demand = read_remind_data(
+            snakemake.input["remind_data"],
+            "p32_load_sector",
+            rename_columns={
+                "ttot": "year",
+                "all_regi": "region",
+                "loadPy32": "sector",
+            },
+        )
 
     demand = demand[["year", "region", "sector", "value"]].copy()
 

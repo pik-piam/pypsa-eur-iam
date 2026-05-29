@@ -31,7 +31,7 @@ def extract_remind_parameter_data(snakemake, mapped_regions: set[str]) -> pd.Dat
 
     costs = read_remind_data(
         file_path=snakemake.input["remind_data"],
-        variable_name="p32_capCostwAdjCost",
+        variable_name="p32_capCost",
         rename_columns={"ttot": "year", "all_regi": "region", "all_te": "technology"},
     ).query("year == @year")
     costs["value"] *= 1e6
@@ -126,6 +126,25 @@ def build_mapped_overrides(
         on=["reference", "parameter"],
         how="left",
     )
+
+    # Technologies absent from the GDX produce NaN values after the left join.
+    # Fall back to PyPSA-Eur baseline for those (technology, parameter) pairs so
+    # that merge_overrides_into_baseline never overwrites valid baseline costs with NaN.
+    missing_mask = merged["value"].isna()
+    if missing_mask.any():
+        missing = (
+            merged.loc[missing_mask, ["PyPSA-Eur technology", "reference", "parameter"]]
+            .drop_duplicates()
+        )
+        for _, row in missing.iterrows():
+            logger.warning(
+                "REMIND reference '%s' (→ '%s', parameter '%s') not found in GDX "
+                "— falling back to PyPSA-Eur baseline value.",
+                row["reference"],
+                row["PyPSA-Eur technology"],
+                row["parameter"],
+            )
+        merged = merged[~missing_mask]
 
     # Average over regions (typically one REMIND region per single-country run)
     out = (
@@ -272,10 +291,10 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "import_REMIND_costs",
-            scen_REMIND="TEST_multiregion",
+            scen_REMIND="PkBudg1000_EU",
             iter_REMIND="1",
-            year_REMIND="2030",
-            configfiles="config/config.remind_multiregion.yaml",
+            year_REMIND="2050",
+            configfiles="config/config.remind_europe.yaml",
         )
 
     configure_logging(snakemake)

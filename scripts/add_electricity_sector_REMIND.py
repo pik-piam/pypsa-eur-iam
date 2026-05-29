@@ -239,12 +239,12 @@ def _fleet_evs_by_node_from_rds(
 def attach_hydrogen_demand_remind(
     n: pypsa.Network,
     sectoral_load: pd.DataFrame,
-    region_mapping_fn: str,
 ) -> None:
     """
     Add a fixed H2 Load at each H2 bus, distributing the REMIND electrolysis demand
-    across buses within each region proportionally to the existing AC load.
+    across buses within each country proportionally to the existing AC load.
     """
+    # sectoral_load["region"] contains ISO-2 country codes (from sectoral_load_country.csv)
     h2_demand = (
         sectoral_load.query("sector == 'electrolysis'")
         .groupby("region", as_index=True)["value"]
@@ -259,9 +259,7 @@ def attach_hydrogen_demand_remind(
         logger.warning("No H2 buses in network; skipping REMIND hydrogen demand attachment.")
         return
 
-    country_to_region = _get_country_to_region(region_mapping_fn)
     h2_buses["country"] = h2_buses["location"].map(n.buses["country"])
-    h2_buses["region"] = h2_buses["country"].map(country_to_region)
 
     bus_load = n.loads_t.p_set.sum(axis=0).groupby(n.loads["bus"]).sum()
 
@@ -270,17 +268,17 @@ def attach_hydrogen_demand_remind(
         snapshot_hours = 8760.0
 
     attached = 0
-    for region, demand_mwh in h2_demand.items():
-        region_h2 = h2_buses[h2_buses["region"] == region]
-        if region_h2.empty:
+    for country, demand_mwh in h2_demand.items():
+        country_h2 = h2_buses[h2_buses["country"] == country]
+        if country_h2.empty:
             continue
 
-        region_ac = region_h2["location"].dropna().astype(str)
-        weights = _normalize_weights(bus_load.reindex(region_ac).fillna(0.0))
+        country_ac = country_h2["location"].dropna().astype(str)
+        weights = _normalize_weights(bus_load.reindex(country_ac).fillna(0.0))
         if weights.empty:
             continue
 
-        for bus, row in region_h2.iterrows():
+        for bus, row in country_h2.iterrows():
             w = float(weights.get(str(row["location"]), 0.0))
             if w <= 0:
                 continue
@@ -1141,7 +1139,6 @@ if __name__ == "__main__":
         attach_hydrogen_demand_remind(
             n,
             sectoral_load,
-            snakemake.input.region_mapping,
         )
 
     if sector_coupling["EV_pass"]["enable"]:

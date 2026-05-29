@@ -1,0 +1,285 @@
+%YAML 1.1
+---
+# yaml-language-server: $schema=./schema.default.json
+
+logging:
+  format: '%(asctime)s %(levelname)s:%(name)s:%(message)s'
+  datefmt: '%Y-%m-%d %H:%M:%S'
+
+# REMIND-specific settings
+remind_coupling:
+  # Coupled years, set by import_REMIND_config.py from the tPy32 set in REMIND2PyPSAEUR.gdx
+  years: [2030, 2035, 2040, 2045, 2050, 2055, 2060, 2070, 2080, 2090, 2100, 2110, 2130, 2150]
+  # Enforce REMIND capacities via constraint in solve_network.py
+  installed_capacities:
+    generators: true
+    links: true
+    stores: true
+  # Hydrogen settings
+  hydrogen_storage:
+    hydrogen_underground_storage_locations:
+      - onshore
+      - nearshore
+  # Battery settings
+  battery_storage:
+    e_min_pu: 0.15
+  sector_coupling:
+    # Add electricity demand for electrolytic hydrogen
+    electrolysis:
+      enable: true
+      # Minimum partial load
+      p_min_pu: 0.1
+      # Ramping limit
+      ramp_limit: NaN
+    # Add electricity demand for passenger EVs
+    EV_pass:
+      enable: true
+      # Estimate fleet size if EDGE-T didn't run yet
+      annual_consumption: 4  # MWh/year
+      charge_rate: 0.011  # MW, 11 kW
+      share_charger: 0.8  # Number of chargers per EV
+      # DSM settings
+      dsm: false
+      battery_size: 0.06  # MWh, 60 kWh
+      dsm_availability: 0.5
+    # Add electricity demand for EV freight (currently not used)
+    EV_freight:
+      enable: false
+      # Estimate fleet size if EDGE-T didn't run yet
+      annual_consumption: 40  # MWh/year
+      charge_rate: 0.15  # MW, 150 kW
+      share_charger: 0.1  # Number of chargers per e-truck
+      # DSM settings
+      dsm: false
+      battery_size: 0.3  # MWh, 300 kWh
+      dsm_availability: 0.5
+    # Add electricity demand for heat pumps
+    heatpump:
+      enable: true
+      # Flexibility settings
+      dsm: false
+      ep_ratio: 3  # hours, E/P relative to peak load
+    # Add electricity demand for resistive heating
+    resistive:
+      enable: true
+      # Flexibility settings
+      dsm: false
+      ep_ratio: 2  # hours, E/P relative to peak load
+  # Downscale REMIND regional demand to country level using SSP population and GDP weights
+  demand_downscaling:
+    ssp_scenario: SSP2
+    # Population: only one provider available in the IIASA SSP database
+    ssp_population_model: IIASA-WiC POP 2025
+    # GDP: two country-level models available — "OECD ENV-Growth 2025", "IIASA-WiC POP 2025"
+    ssp_gdp_model: OECD ENV-Growth 2025
+    # Weights per sector: gdp + population must sum to 1
+    # AC: PyPSA-Eur standard 60/40 (mixed industrial/residential/commercial)
+    # electrolysis: industrial character -> higher GDP weight
+    # EV_pass: passenger vehicles -> higher population weight
+    # EV_freight: freight vehicles -> equal split
+    # heatpump/resistive: residential heating -> higher population weight
+    sector_weights:
+      AC:
+        gdp: 0.6
+        population: 0.4
+      electrolysis:
+        gdp: 0.7
+        population: 0.3
+      EV_pass:
+        gdp: 0.3
+        population: 0.7
+      EV_freight:
+        gdp: 0.5
+        population: 0.5
+      heatpump:
+        gdp: 0.3
+        population: 0.7
+      resistive:
+        gdp: 0.3
+        population: 0.7
+  export_to_REMIND:
+    # Cut off scarcity prices above z-score
+    z_cutoff: 3
+
+run:
+  name: "Europe"
+  disable_progressbar: true
+  # Share resources across REMIND scenarios
+  shared_resources:
+    policy: false
+
+scenario:
+  # 26 countries across 9 REMIND-EU regions.
+  # Minimum clusters = number of (country, sub_network) pairs, not countries.
+  # After network build + simplification the processed network has 31 distinct
+  # (country, sub_network) pairs (confirmed from cluster_network.py assertion).
+  clusters:
+    - 31
+  year:
+    - 2025
+    - 2030
+    - 2035
+    - 2040
+    - 2045
+    - 2050
+    - 2055
+    - 2060
+    - 2070
+    - 2080
+    - 2090
+    - 2100
+    - 2110
+    - 2130
+    - 2150
+  planning_horizons:
+    - 2025
+    - 2030
+    - 2035
+    - 2040
+    - 2045
+    - 2050
+    - 2055
+    - 2060
+    - 2070
+    - 2080
+    - 2090
+    - 2100
+    - 2110
+    - 2130
+    - 2150
+
+# Countries covered by all 9 REMIND-EU regions:
+#   DEU: DE
+#   FRA: FR
+#   UKI: GB, IE  (GG/GI/IM/JE excluded: no PyPSA-Eur data)
+#   ENC: DK, FI, SE  (AX/FO excluded: no PyPSA-Eur data)
+#   EWN: AT, BE, LU, NL
+#   ECE: CZ, EE, LT, LV, PL, SK
+#   ECS: BG, HR, HU, RO, SI
+#   ESC: GR, IT  (CY/MT excluded: not in PyPSA-Eur default dataset)
+#   ESW: ES, PT
+countries:
+  - DE   # DEU
+  - FR   # FRA
+  - GB   # UKI
+  - IE   # UKI
+  - DK   # ENC
+  - FI   # ENC
+  - SE   # ENC
+  - AT   # EWN
+  - BE   # EWN
+  - LU   # EWN
+  - NL   # EWN
+  - CZ   # ECE
+  - EE   # ECE
+  - LT   # ECE
+  - LV   # ECE
+  - PL   # ECE
+  - SK   # ECE
+  - BG   # ECS
+  - HR   # ECS
+  - HU   # ECS
+  - RO   # ECS
+  - SI   # ECS
+  - GR   # ESC
+  - IT   # ESC
+  - ES   # ESW
+  - PT   # ESW
+
+electricity:
+  # Additional technologies introduced to match REMIND
+  extendable_carriers:
+    Generator:
+      - solar
+      - onwind
+      - offwind-ac
+      - ocgt
+      - ccgt
+      - ccgt-ccs
+      - gas-chp
+      - nuclear
+      - oil
+      - coal-pc
+      - coal-igcc
+      - coal-igcc-ccs
+      - coal-chp
+      - biomass-chp
+      - biomass-igcc
+      - biomass-igcc-ccs
+  # Powerplants are filtered in adjust_powerplants_REMIND
+  powerplants_filter: false
+  # Add powerplants at all locations (p_nom=0; for technologies with no existing plants)
+  everywhere_powerplants:
+    - ocgt
+    - nuclear
+    - oil
+    - ccgt
+    - gas-chp
+    - ccgt-ccs
+    - coal-pc
+    - coal-igcc
+    - coal-igcc-ccs
+    - coal-chp
+    - biomass-chp
+    - biomass-igcc
+    - biomass-igcc-ccs
+  conventional_carriers:
+    - ocgt
+    - ccgt
+    - ccgt-ccs
+    - gas-chp
+    - nuclear
+    - oil
+    - coal-pc
+    - coal-igcc
+    - coal-igcc-ccs
+    - coal-chp
+    - biomass-chp
+    - biomass-igcc
+    - biomass-igcc-ccs
+  renewable_carriers:
+    - solar
+    - onwind
+    - offwind-ac
+    - hydro
+  # Don't estimate renewable capacities for now
+  estimate_renewable_capacities:
+    enable: false
+
+# Adjust potentials to match REMIND
+renewable:
+  offwind-ac:
+    # REMIND uses a single offshore wind technology covering all offshore areas.
+    # capacity_per_sqkm increased to enable the potential required by REMIND.
+    # max_shore_distance removed (was 30 km): offwind-ac now represents all offshore, not just near-shore.
+    capacity_per_sqkm: 11.2
+    max_shore_distance:
+  solar:
+    capacity_per_sqkm: 21.5
+
+sector:
+  district_heating:
+    supply_temperature_approximation:
+      # Ensure consistency with REMIND across all years
+      relative_annual_temperature_reduction: 0
+
+clustering:
+  temporal:
+    resolution_elec: 3h
+
+solving:
+  options:
+    load_shedding: 1000  # EUR/MWh (default unit at bus)
+    # Inject constraints for minimum capacities
+    custom_extra_functionality: ../scripts/remind_extra_constraints.py
+  gurobi_hpc_tunnel:
+    use_tunnel: false
+    tunnel_port: 26998
+    login_node: '02'
+    timeout_s: 15
+  solver_options:
+    gurobi-default:
+      threads: 8
+  mem_mb: 30000
+  memory_logging_frequency: 30
+  runtime: 6h

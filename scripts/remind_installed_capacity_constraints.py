@@ -112,6 +112,13 @@ def _add_component_lower_bound_constraints(
         carrier_to_group,
     )
 
+    # Restrict targets to groups reachable from this component's carriers so that
+    # generator targets don't appear as spurious "missing" links or stores.
+    reachable_groups = set(technology_groups.dropna().unique())
+    targets = targets[targets.index.get_level_values("carrier").isin(reachable_groups)]
+    if targets.empty:
+        return
+
     labels = pd.DataFrame(
         {
             "region_REMIND": regions,

@@ -85,14 +85,25 @@ def _compute_weights(
     gdp_w = w["gdp"]
     pop_w = w["population"]
 
+    # SSP data ends at 2100; clamp to the last available year rather than
+    # falling back to zero (which would produce spurious uniform weights).
+    available_years = pop_data.index.get_level_values("year").unique()
+    lookup_year = min(year, available_years.max())
+    if lookup_year != year:
+        logger.debug(
+            "SSP data unavailable for year %d — using %d weights instead.",
+            year,
+            lookup_year,
+        )
+
     pop = pop_data.reindex(
         pd.MultiIndex.from_product(
-            [[c for c in countries], [year]], names=["iso2", "year"]
+            [[c for c in countries], [lookup_year]], names=["iso2", "year"]
         )
     )["value"].fillna(0.0)
     gdp = gdp_data.reindex(
         pd.MultiIndex.from_product(
-            [[c for c in countries], [year]], names=["iso2", "year"]
+            [[c for c in countries], [lookup_year]], names=["iso2", "year"]
         )
     )["value"].fillna(0.0)
 

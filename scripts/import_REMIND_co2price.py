@@ -38,15 +38,22 @@ if __name__ == "__main__":
     # unit conversion from USD/tC to USD/tCO2
     co2_price["value"] *= 12 / (12 + 2 * 16)
 
-    years_coupled = (
-        read_remind_data(
-            file_path=snakemake.input["remind_data"],
-            variable_name="tPy32",
-            rename_columns={"ttot": "year"},
+    try:
+        years_coupled = (
+            read_remind_data(
+                file_path=snakemake.input["remind_data"],
+                variable_name="tPy32",
+                rename_columns={"ttot": "year"},
+            )
+            .year.unique()
+            .tolist()
         )
-        .year.unique()
-        .tolist()
-    )
+        logger.info("Read coupled years from tPy32 set in GDX.")
+    except KeyError:
+        years_coupled = snakemake.config["remind_coupling"]["years"]
+        logger.info(
+            "tPy32 not found in GDX — using years from config: %s", years_coupled
+        )
 
     # Calculate mean CO2 price across all regions overlapping between REMIND and PyPSA-EUR countries for each year
     # TODO: Implement regional prices in PyPSA!

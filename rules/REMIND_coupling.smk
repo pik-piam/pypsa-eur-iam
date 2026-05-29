@@ -21,18 +21,32 @@ rule retrieve_ssp_data:
         scripts("retrieve_ssp_data.py")
 
 
-# Download and prepare all files, which are independent of REMIND inputs and
-# requre internet connection on login nodes. Configure Gurobi before running.
+# Download and prepare all files that are independent of REMIND inputs and
+# require an internet connection on login nodes. Configure Gurobi before running.
 #   export GRB_LICENSE_FILE=/p/projects/rd3mod/gurobi.lic
-#   snakemake -s Snakefile_REMIND --cores 4 download_and_prepare_REMIND --omit-from add_electricity
-# The --omit from flag makes sure that add_electricity isn't called
+#   snakemake -s Snakefile_REMIND --c4 download_and_prepare_REMIND --omit-from add_electricity
+# The --omit from flag makes sure that add_electricity itself isn't called
 rule download_and_prepare_REMIND:
     input:
         expand(
             rules.add_electricity.output[0],
             clusters=config["scenario"]["clusters"],
         ),
+        # SSP data for downscaling
         rules.retrieve_ssp_data.output,
+        # Sector-coupling inputs
+        expand(resources("salt_cavern_potentials_s_{clusters}.csv"),
+               clusters=config["scenario"]["clusters"]),
+        expand(resources("transport_demand_s_{clusters}.csv"),
+               clusters=config["scenario"]["clusters"]),
+        expand(resources("temp_air_total_base_s_{clusters}.nc"),
+               clusters=config["scenario"]["clusters"]),
+        expand(resources("hourly_heat_demand_total_base_s_{clusters}.nc"),
+               clusters=config["scenario"]["clusters"]),
+        expand(resources("cop_profiles_base_s_{clusters}_2030.nc"),
+               clusters=config["scenario"]["clusters"]),
+        expand(resources("hourly_water_heat_demand_total_base_s_{clusters}.nc"),
+               clusters=config["scenario"]["clusters"]),
 
 # Before calling PyPSA-Eur the config file is created by import_REMIND_config.py
 #
