@@ -37,12 +37,14 @@ biomass-igcc-ccs,,,,VOM,REMIND,bioigccc,,
 ccgt,Natural Gas,CCGT,,CO2 intensity,REMIND,ngcc,,
 ccgt,Natural Gas,CCGT,,efficiency,REMIND,ngcc,,
 ccgt,Natural Gas,CCGT,,FOM,REMIND,ngcc,,
+ccgt,Natural Gas,CCGT,,fuel,REMIND,pegas,USD/MWh_th,Natural gas fuel price from REMIND p32_PEPriceAvg
 ccgt,Natural Gas,CCGT,,investment,REMIND,ngcc,,
 ccgt,Natural Gas,CCGT,,lifetime,REMIND,ngcc,,
 ccgt,Natural Gas,CCGT,,VOM,REMIND,ngcc,,
 ccgt-ccs,,,,CO2 intensity,REMIND,ngccc,,
 ccgt-ccs,,,,efficiency,REMIND,ngccc,,
 ccgt-ccs,,,,FOM,REMIND,ngccc,,
+ccgt-ccs,,,,fuel,REMIND,pegas,USD/MWh_th,Natural gas fuel price from REMIND p32_PEPriceAvg
 ccgt-ccs,,,,investment,REMIND,ngccc,,
 ccgt-ccs,,,,lifetime,REMIND,ngccc,,
 ccgt-ccs,,,,VOM,REMIND,ngccc,,
@@ -98,6 +100,7 @@ fuel cell,,,,VOM,REMIND,h2turb,,
 gas-chp,Natural Gas,,CHP,CO2 intensity,REMIND,gaschp,,
 gas-chp,Natural Gas,,CHP,efficiency,REMIND,gaschp,,
 gas-chp,Natural Gas,,CHP,FOM,REMIND,gaschp,,
+gas-chp,Natural Gas,,CHP,fuel,REMIND,pegas,USD/MWh_th,Natural gas fuel price from REMIND p32_PEPriceAvg
 gas-chp,Natural Gas,,CHP,investment,REMIND,gaschp,,
 gas-chp,Natural Gas,,CHP,lifetime,REMIND,gaschp,,
 gas-chp,Natural Gas,,CHP,VOM,REMIND,gaschp,,
@@ -170,6 +173,7 @@ nuclear-fast,,,,VOM,REMIND,fnrs,,
 ocgt,Natural Gas,OCGT,,CO2 intensity,REMIND,ngt,,
 ocgt,Natural Gas,OCGT,,efficiency,REMIND,ngt,,
 ocgt,Natural Gas,OCGT,,FOM,REMIND,ngt,,
+ocgt,Natural Gas,OCGT,,fuel,REMIND,pegas,USD/MWh_th,Natural gas fuel price from REMIND p32_PEPriceAvg
 ocgt,Natural Gas,OCGT,,investment,REMIND,ngt,,
 ocgt,Natural Gas,OCGT,,lifetime,REMIND,ngt,,
 ocgt,Natural Gas,OCGT,,VOM,REMIND,ngt,,
@@ -236,3 +240,10 @@ solar,,,,fuel,fixed,0,USD/MWh,Dummy value to avoid PyPSA-EUR throwing an error
 solar,,,,investment,REMIND,spv,,
 solar,,,,lifetime,REMIND,spv,,
 solar,,,,VOM,fixed,0,USD/MWh,"No value originally in PyPSA-EUR databse, using default fill value"
+solar-utility,,,,CO2 intensity,fixed,0,tCO2/MWh_th,Process without direct emissions
+solar-utility,,,,efficiency,REMIND,spv,,
+solar-utility,,,,FOM,REMIND,spv,,
+solar-utility,,,,fuel,fixed,0,USD/MWh,Dummy value to avoid PyPSA-EUR throwing an error
+solar-utility,,,,investment,REMIND,spv,,
+solar-utility,,,,lifetime,REMIND,spv,,
+solar-utility,,,,VOM,fixed,0,USD/MWh,"No value originally in PyPSA-EUR databse, using default fill value"

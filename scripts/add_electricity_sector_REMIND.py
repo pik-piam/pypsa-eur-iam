@@ -33,7 +33,6 @@ from scripts.add_electricity import (
     estimate_renewable_capacities,
     get_snapshots,
     load_and_aggregate_powerplants,
-    load_costs,
     normed,
     sanitize_carriers,
     sanitize_locations,
@@ -947,6 +946,69 @@ def attach_hydrogen_storage_remind(
     )
 
 
+def apply_regional_costs(
+    n: pypsa.Network,
+    costs_regional: pd.DataFrame,
+    co2_price_by_region: dict,
+    country_to_region: pd.Series,
+) -> None:
+    """
+    Override capital_cost and marginal_cost per network component using REMIND regional values.
+
+    Called after all components have been added with region-averaged costs.  For each
+    component the function looks up the REMIND region of its bus, retrieves the
+    region-specific capital_cost and marginal_cost from *costs_regional*, and writes
+    those values back to the component DataFrames in place.
+
+    Additionally adds the regional CO₂ cost contribution to generator marginal costs,
+    replacing the global CO₂ cost that would otherwise be applied by prepare_network.py.
+    """
+    def _apply_costs(df: pd.DataFrame, bus_col: str) -> None:
+        if df.empty:
+            return
+        countries = n.buses.loc[df[bus_col], "country"].values
+        regions = pd.Series(countries, index=df.index).map(country_to_region)
+        # Build (region, carrier) lookup keys for each component row
+        keys = pd.MultiIndex.from_arrays([regions, df["carrier"]])
+        valid_mask = keys.isin(costs_regional.index)
+        if not valid_mask.any():
+            return
+        valid_idx = df.index[valid_mask]
+        valid_keys = keys[valid_mask]
+        for col in ["capital_cost", "marginal_cost"]:
+            if col not in costs_regional.columns:
+                continue
+            new_vals = costs_regional.loc[valid_keys, col].values
+            not_nan = ~pd.isna(new_vals)
+            df.loc[valid_idx[not_nan], col] = new_vals[not_nan]
+
+    _apply_costs(n.generators, "bus")
+    _apply_costs(n.links, "bus0")
+    _apply_costs(n.storage_units, "bus")
+    _apply_costs(n.stores, "bus")
+
+    # Add regional CO₂ cost contribution to generator marginal costs.
+    # This replaces the global add_emission_prices() that prepare_network.py would
+    # otherwise call; emission_prices.enable is set to False in _remind_emission_prices.
+    if not n.generators.empty and co2_price_by_region:
+        countries = n.buses.loc[n.generators["bus"], "country"].values
+        regions = pd.Series(countries, index=n.generators.index).map(country_to_region)
+        co2_price_series = regions.map(co2_price_by_region).fillna(0.0)
+        co2_intensity = n.generators["carrier"].map(n.carriers["co2_emissions"]).fillna(0.0)
+        efficiency = n.generators["efficiency"].replace(0.0, 1.0)
+        n.generators["marginal_cost"] += co2_intensity * co2_price_series / efficiency
+
+    if not n.storage_units.empty and co2_price_by_region:
+        countries = n.buses.loc[n.storage_units["bus"], "country"].values
+        regions = pd.Series(countries, index=n.storage_units.index).map(country_to_region)
+        co2_price_series = regions.map(co2_price_by_region).fillna(0.0)
+        co2_intensity = n.storage_units["carrier"].map(n.carriers["co2_emissions"]).fillna(0.0)
+        efficiency = n.storage_units["efficiency_dispatch"].replace(0.0, 1.0)
+        n.storage_units["marginal_cost"] += co2_intensity * co2_price_series / efficiency
+
+    logger.info("Applied regional REMIND costs to all network components.")
+
+
 # %%
 
 if __name__ == "__main__":
@@ -979,7 +1041,20 @@ if __name__ == "__main__":
     time = get_snapshots(snakemake.params.snapshots, snakemake.params.drop_leap_day)
     n.set_snapshots(time)
 
-    costs = load_costs(snakemake.input.costs)
+    # Load costs with (region, technology) MultiIndex; derive region-averaged fallback
+    # for upstream attach_* functions that don't know about regional variation.
+    costs_regional = pd.read_csv(snakemake.input.costs, index_col=[0, 1])
+    costs = costs_regional.groupby(level="technology").mean()
+
+    # Per-region CO₂ prices (applied in apply_regional_costs below)
+    co2_price_df = pd.read_csv(snakemake.input.co2_price)
+    co2_price_by_region = (
+        co2_price_df.query("year == @year")
+        .set_index("region")["co2_price"]
+        .to_dict()
+    )
+
+    country_to_region = _get_country_to_region(snakemake.input.region_mapping)
 
     ppl = load_and_aggregate_powerplants(
         snakemake.input.powerplants,
@@ -1228,6 +1303,10 @@ if __name__ == "__main__":
     for carrier in costs.index:
         if carrier in n.carriers.index and not pd.isna(costs.at[carrier, "CO2 intensity"]):
             n.carriers.at[carrier, "co2_emissions"] = costs.at[carrier, "CO2 intensity"]
+
+    # Override component costs with per-region REMIND values and add regional CO₂ costs.
+    # Must run after carrier CO₂ intensities are set above (needed for CO₂ cost calc).
+    apply_regional_costs(n, costs_regional, co2_price_by_region, country_to_region)
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])

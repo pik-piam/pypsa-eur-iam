@@ -8,13 +8,14 @@ logging:
 
 # REMIND-specific settings
 remind_coupling:
-  # Coupled years, set by import_REMIND_config.py from the tPy32 set in REMIND2PyPSAEUR.gdx
+  # Coupled years, set by import_REMIND_config.py from the t set in REMIND2PyPSAEUR.gdx
   years: [2030, 2035, 2040, 2045, 2050, 2055, 2060, 2070, 2080, 2090, 2100, 2110, 2130, 2150]
   # Enforce REMIND capacities via constraint in solve_network.py
   installed_capacities:
     generators: true
     links: true
     stores: true
+    fixed: false  # if true, also apply upper bounds — pins regional capacity sums to REMIND values
   # Hydrogen settings
   hydrogen_storage:
     hydrogen_underground_storage_locations:
@@ -228,6 +229,16 @@ sector:
     supply_temperature_approximation:
       # Ensure consistency with REMIND across all years
       relative_annual_temperature_reduction: 0
+
+costs:
+  # Regional CO₂ costs are applied per-generator in add_electricity_sector_REMIND.py
+  # using per-region prices from import_REMIND_co2price.py.  The upstream
+  # add_emission_prices() mechanism in prepare_network.py must stay disabled to
+  # avoid double-counting.
+  emission_prices:
+    enable: false
+    dynamic: false
+    co2: 0.0
 
 clustering:
   temporal:

@@ -1,65 +1,82 @@
 """
 Retrieve SSP population and GDP projections from the IIASA scenario database.
 
-Uses the pyam package to download data from the IIASA SSP database and saves
-country-level population and GDP|PPP time series as CSV files. These are used
-by ``downscale_REMIND_demand`` to disaggregate REMIND regional demand to
-individual countries.
+Calls the IIASA SSP REST API directly via httpx (no ixmp4/pyam dependency).
+Saves country-level population and GDP|PPP time series as CSV files used by
+``downscale_REMIND_demand`` to disaggregate REMIND regional demand.
 
-Country names returned by pyam (English full names) are mapped to ISO-2 codes
+Country names returned by the API (English full names) are mapped to ISO-2 codes
 using the ``country_converter`` package. Data is at 5-year intervals matching
 REMIND's time resolution — no interpolation is applied.
 
 Outputs
 -------
-- ``ssp_population.csv``: columns [iso2, year, value] (population in millions)
-- ``ssp_gdp.csv``: columns [iso2, year, value] (GDP|PPP in billion USD 2005)
+- ``population.csv``: columns [iso2, year, value] (population in millions)
+- ``gdp.csv``: columns [iso2, year, value] (GDP|PPP in billion USD 2005)
 """
 
 import logging
 
 import country_converter as coco
+import httpx
 import pandas as pd
 from _helpers import configure_logging, mock_snakemake
-from pyam import read_ixmp4
 
 logger = logging.getLogger(__name__)
 
+IIASA_URL = "https://ixmp4.ece.iiasa.ac.at/v1/ssp/iamc/datapoints/"
+IIASA_PARAMS = {"join_parameters": "true", "join_runs": "true", "table": "true"}
+
+
+def _fetch_variable(variable: str) -> pd.DataFrame:
+    """Download one IAMC variable from the IIASA SSP platform, return all rows."""
+    logger.info("Fetching '%s' from IIASA SSP API …", variable)
+    resp = httpx.patch(
+        IIASA_URL,
+        params=IIASA_PARAMS,
+        json={"variable": {"name": variable}},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    payload = resp.json()["results"]
+    df = pd.DataFrame(payload["data"], columns=payload["columns"])
+    logger.info("  received %d rows", len(df))
+    return df
+
 
 def _retrieve_variable(
-    database: str,
+    variable: str,
     model: str,
     scenario: str,
-    variable: str,
     label: str,
 ) -> pd.DataFrame:
-    """Download one variable from IIASA, return long DataFrame with [iso2, year, value]."""
-    logger.info("Retrieving %s from IIASA (%s / %s)...", variable, model, scenario)
-    df = read_ixmp4(
-        database,
-        model=model,
-        scenario=scenario,
-        variable=variable,
+    """Fetch variable, filter to model/scenario, map regions to ISO-2."""
+    df = _fetch_variable(variable)
+    df = df[(df["model"] == model) & (df["scenario"] == scenario)].copy()
+    logger.info(
+        "After filtering to %s / %s: %d rows", model, scenario, len(df)
     )
-    data = df.data[["region", "year", "value"]].copy()
+
     cc = coco.CountryConverter()
-    data["iso2"] = cc.pandas_convert(
-        pd.Series(data["region"]), to="ISO2", not_found=None
+    df["iso2"] = cc.pandas_convert(
+        pd.Series(df["region"]), to="ISO2", not_found=None
     )
-    # Drop entries that could not be mapped to an ISO-2 country (regions/aggregates)
-    n_before = len(data)
-    data = data.dropna(subset=["iso2"])
-    n_dropped = n_before - len(data)
+    n_before = len(df)
+    df = df.dropna(subset=["iso2"])
+    n_dropped = n_before - len(df)
     if n_dropped:
         logger.debug("Dropped %d non-country entries for %s", n_dropped, label)
-    data = (
-        data[["iso2", "year", "value"]]
+
+    result = (
+        df[["iso2", "step_year", "value"]]
+        .rename(columns={"step_year": "year"})
         .groupby(["iso2", "year"], as_index=False)["value"]
         .sum()
         .sort_values(["iso2", "year"])
+        .reset_index(drop=True)
     )
-    logger.info("Retrieved %s for %d country-year combinations.", label, len(data))
-    return data
+    logger.info("Retrieved %s for %d country-year combinations.", label, len(result))
+    return result
 
 
 if __name__ == "__main__":
@@ -72,24 +89,21 @@ if __name__ == "__main__":
     configure_logging(snakemake)
 
     params = snakemake.params
-    database = "ssp"
     scenario = params.ssp_scenario
 
     population = _retrieve_variable(
-        database,
+        variable="Population",
         model=params.ssp_population_model,
         scenario=scenario,
-        variable="Population",
         label="population",
     )
     population.to_csv(snakemake.output.population, index=False)
     logger.info("Wrote population data to %s", snakemake.output.population)
 
     gdp = _retrieve_variable(
-        database,
+        variable="GDP|PPP",
         model=params.ssp_gdp_model,
         scenario=scenario,
-        variable="GDP|PPP",
         label="GDP|PPP",
     )
     gdp.to_csv(snakemake.output.gdp, index=False)

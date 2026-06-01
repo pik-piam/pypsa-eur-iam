@@ -1,8 +1,9 @@
 
-"""Import a year-level CO2 price pathway from REMIND."""
+"""Import a year-level CO2 price pathway from REMIND, per REMIND region."""
 
 import logging
 
+import pandas as pd
 from _helpers import configure_logging, get_region_mapping, read_remind_data
 
 logger = logging.getLogger(__name__)
@@ -49,22 +50,27 @@ if __name__ == "__main__":
     )
     logger.info("Read coupled years from t set in GDX.")
 
-    # Calculate mean CO2 price across all regions overlapping between REMIND and PyPSA-EUR countries for each year
-    # TODO: Implement regional prices in PyPSA!
+    co2_price = co2_price.loc[co2_price["region"].isin(mapped_regions)].copy()
+    co2_price["year"] = co2_price["year"].astype(int)
     co2_price = (
-        co2_price.loc[co2_price["region"].isin(mapped_regions)]
-        .groupby("year", observed=False)["value"]
-        .mean()
-    )
-
-    co2_price.index = co2_price.index.astype(int)
-    co2_price = (
-        co2_price.reindex(list(map(int, years_coupled)), fill_value=0)
-        .to_frame("co2_price")
+        co2_price.set_index(["region", "year"])["value"]
+        .reindex(
+            pd.MultiIndex.from_product(
+                [sorted(mapped_regions), list(map(int, years_coupled))],
+                names=["region", "year"],
+            ),
+            fill_value=0,
+        )
         .reset_index()
+        .rename(columns={"value": "co2_price"})
+        .sort_values(["region", "year"])
+        .reset_index(drop=True)
     )
 
-    co2_price = co2_price.sort_values("year").reset_index(drop=True)
+    logger.info(
+        "CO2 prices per region for coupled years:\n%s",
+        co2_price.pivot(index="year", columns="region", values="co2_price").round(1).to_string(),
+    )
 
     logger.info("Exporting CO2 price pathway to %s", snakemake.output["co2_price"])
     co2_price.to_csv(snakemake.output["co2_price"], index=False)

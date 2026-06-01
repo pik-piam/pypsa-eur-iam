@@ -138,6 +138,7 @@ rule import_REMIND_costs:
         remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
     output:
         costs_processed=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed.csv",
+        costs_processed_flat=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed_flat.csv",
         costs_raw_overwritten=ITERATION_RESOURCES + "y{year_REMIND}/costs_raw_overwritten.csv",
     log:
         ITERATION_LOGS + "y{year_REMIND}/import_REMIND_costs.log",
@@ -282,6 +283,7 @@ rule add_electricity_sector_REMIND:
         capacities=ITERATION_RESOURCES + "installed_capacities.csv",
         wh_share="data/REMIND_SSP2_wh_share.csv",  # REMIND share of water heating
         fleet_file=_get_fleet_input,  # EDGE-T fleet
+        co2_price=ITERATION_RESOURCES + "co2_price.csv",  # REMIND specific; regional CO₂ costs applied here
     output:
         ITERATION_RESOURCES + "y{year_REMIND}/networks/base_s_{clusters}_elec.nc",
     log:
@@ -297,16 +299,6 @@ rule add_electricity_sector_REMIND:
         scripts("add_electricity_sector_REMIND.py")
 
 
-# Helper function to read CO2 prices from CSV to feed into prepare_network_REMIND parameter without changing the script
-def _remind_emission_prices(wildcards, input):
-    co2_prices = pd.read_csv(str(input.remind_co2_price)).set_index("year")["co2_price"]
-    return {
-        "enable": True,
-        "dynamic": False,
-        "co2": float(co2_prices.loc[int(wildcards.year_REMIND)]),
-    }
-
-
 # Prepare network, specifically adding the CO2 price
 rule prepare_network_REMIND:
     message:
@@ -320,15 +312,14 @@ rule prepare_network_REMIND:
         co2limit=config_provider("electricity", "co2limit"),
         gaslimit_enable=config_provider("electricity", "gaslimit_enable", default=False),
         gaslimit=config_provider("electricity", "gaslimit"),
-        emission_prices=_remind_emission_prices,  # REMIND specific
+        emission_prices=config_provider("costs", "emission_prices"),
         adjustments=config_provider("adjustments", "electricity"),
         autarky=config_provider("electricity", "autarky", default={}),
         drop_leap_day=config_provider("enable", "drop_leap_day"),
         transmission_limit=config_provider("electricity", "transmission_limit"),
     input:
         ITERATION_RESOURCES + "y{year_REMIND}/networks/base_s_{clusters}_elec.nc",
-        costs=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed.csv",  # REMIND specific
-        remind_co2_price=ITERATION_RESOURCES + "co2_price.csv",  # REMIND specific; triggers import_REMIND_co2price
+        costs=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed_flat.csv",  # REMIND specific; flat (region-averaged) for prepare_network.py's load_costs()
         co2_price=lambda w: (
             resources("co2_price.csv")
             if config_provider("costs", "emission_prices", "dynamic")(w)

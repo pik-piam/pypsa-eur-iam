@@ -6,14 +6,14 @@ Reads investment costs, fixed/variable O&M, lifetime, efficiency, CO2 intensity,
 fuel costs from the REMIND GDX file, maps them to PyPSA-Eur carrier names via the
 technology mapping CSV, and merges the result as overrides on top of the PyPSA-Eur
 baseline cost CSV. Investment costs for electrolysis and battery inverter are converted
-from output-capacity to input-capacity basis. A single discount rate from REMIND is
-applied to all technologies, and PyPSA-Eur's ``prepare_costs`` function computes
-annualised capital costs and marginal costs.
+from output-capacity to input-capacity basis. Per-region discount rates from REMIND are
+used, and PyPSA-Eur's ``prepare_costs`` function computes annualised capital costs and
+marginal costs — called once per mapped REMIND region.
 
 Outputs
 -------
-- ``costs_raw_overwritten.csv``: raw cost table restricted to mapped technologies, with REMIND overrides applied.
-- ``costs_processed.csv``: processed cost table (capital_cost, marginal_cost, etc.) ready for the network build.
+- ``costs_raw_overwritten.csv``: raw cost table restricted to mapped technologies, with REMIND overrides applied; one block per region (region column is the first column).
+- ``costs_processed.csv``: processed cost table (capital_cost, marginal_cost, etc.) ready for the network build; indexed by (region, technology) MultiIndex.
 """
 
 import logging
@@ -75,20 +75,23 @@ def extract_remind_parameter_data(snakemake, mapped_regions: set[str]) -> pd.Dat
     co2_intensity["parameter"] = "CO2 intensity"
     co2_intensity["unit"] = "t_CO2/MWh_th"
 
-    efficiency = pd.concat(
-        [
-            read_remind_data(
-                file_path=snakemake.input["remind_data"],
-                variable_name="pm_eta_conv",
-                rename_columns={"tall": "year", "all_regi": "region", "all_te": "technology"},
-            ),
-            read_remind_data(
-                file_path=snakemake.input["remind_data"],
-                variable_name="pm_dataeta",
-                rename_columns={"tall": "year", "all_regi": "region", "all_te": "technology"},
-            ),
-        ]
+    eta_conv = read_remind_data(
+        file_path=snakemake.input["remind_data"],
+        variable_name="pm_eta_conv",
+        rename_columns={"tall": "year", "all_regi": "region", "all_te": "technology"},
     ).query("year == @year")
+    dataeta = read_remind_data(
+        file_path=snakemake.input["remind_data"],
+        variable_name="pm_dataeta",
+        rename_columns={"tall": "year", "all_regi": "region", "all_te": "technology"},
+    ).query("year == @year")
+    # pm_eta_conv has time-varying efficiency; pm_dataeta is the static fallback.
+    # Use pm_eta_conv where available; add pm_dataeta only for technologies absent from pm_eta_conv.
+    eta_conv_keys = set(zip(eta_conv["region"], eta_conv["technology"]))
+    dataeta_fallback = dataeta[
+        ~pd.MultiIndex.from_arrays([dataeta["region"], dataeta["technology"]]).isin(eta_conv_keys)
+    ]
+    efficiency = pd.concat([eta_conv, dataeta_fallback])
     efficiency["parameter"] = "efficiency"
     efficiency["unit"] = "p.u."
     efficiency.loc[efficiency["technology"].isin(["fnrs", "tnrs"]), "value"] *= 8760 / 1e6
@@ -116,7 +119,12 @@ def build_mapped_overrides(
     technology_mapping: pd.DataFrame,
     remind_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Direct 1:1 lookup of REMIND parameter values for mapped PyPSA-Eur carriers."""
+    """
+    Direct 1:1 lookup of REMIND parameter values for mapped PyPSA-Eur carriers.
+
+    Returns exactly one row per (region, technology, parameter) combination;
+    raises if a duplicate is found.
+    """
     mapped = technology_mapping.query(
         "`source` == 'REMIND'"
     ).drop(columns=["unit"])
@@ -146,16 +154,17 @@ def build_mapped_overrides(
             )
         merged = merged[~missing_mask]
 
-    # Average over regions (typically one REMIND region per single-country run)
-    out = (
-        merged.groupby(["PyPSA-Eur technology", "parameter"], observed=False)
-        .agg(value=("value", "mean"), unit=("unit", "first"))
-        .reset_index()
-        .rename(columns={"PyPSA-Eur technology": "technology"})
-    )
+    out = merged.rename(columns={"PyPSA-Eur technology": "technology"})[
+        ["region", "technology", "parameter", "value", "unit"]
+    ].copy()
+    dups = out.duplicated(subset=["region", "technology", "parameter"], keep=False)
+    if dups.any():
+        raise ValueError(
+            f"Duplicate (region, technology, parameter) after REMIND merge:\n{out[dups]}"
+        )
     out["source"] = "REMIND-EU"
     out["further description"] = "Extracted from REMIND-EU model in import_REMIND_costs.py"
-    return out
+    return out[["region", "technology", "parameter", "value", "unit", "source", "further description"]]
 
 
 def build_pypsa_default_overrides(
@@ -193,12 +202,9 @@ def build_set_value_overrides(technology_mapping: pd.DataFrame, mapping_file: st
     return set_df
 
 
-def add_discount_rate(snakemake, costs: pd.DataFrame, mapped_regions: set[str]) -> pd.DataFrame:
-    """Append a discount rate row from REMIND for every technology not already carrying one."""
+def get_discount_rates(snakemake, mapped_regions: set[str]) -> pd.Series:
+    """Return REMIND discount rate per mapped region for the model year, as a Series indexed by region."""
     year = str(snakemake.wildcards["year_REMIND"])  # noqa: F841 — used via @year in .query()
-    with_discount = costs.loc[costs["parameter"] == "discount rate", "technology"]
-    no_discount = costs.loc[~costs["technology"].isin(with_discount)][["technology"]].drop_duplicates()
-
     p_r = read_remind_data(
         file_path=snakemake.input["remind_data"],
         variable_name="p_r",
@@ -210,23 +216,27 @@ def add_discount_rate(snakemake, costs: pd.DataFrame, mapped_regions: set[str]) 
             f"No p_r interest rate found for year {year} and regions {mapped_regions}"
         )
 
-    discount_rate_value = p_r["value"].mean()
-    logger.info(
-        "Using mean interest rate %.4f averaged over %d regions for year %s.",
-        discount_rate_value,
-        len(p_r),
-        year,
-    )
+    missing = mapped_regions - set(p_r["region"])
+    if missing:
+        raise ValueError(f"No discount rate found for regions: {missing}")
 
-    dr = pd.Series(
-        {
-            "parameter": "discount rate",
-            "value": discount_rate_value,
-            "unit": "p.u.",
-            "source": "REMIND-EU",
-            "further description": "p_r",
-        }
-    ).to_frame().T
+    rates = p_r.set_index("region")["value"]
+    logger.info("Regional REMIND discount rates for year %s: %s", year, rates.round(4).to_dict())
+    return rates
+
+
+def add_discount_rate_for_region(costs: pd.DataFrame, discount_rate: float) -> pd.DataFrame:
+    """Append a discount rate row for every technology in *costs* that does not already carry one."""
+    with_discount = costs.loc[costs["parameter"] == "discount rate", "technology"]
+    no_discount = costs.loc[~costs["technology"].isin(with_discount)][["technology"]].drop_duplicates()
+
+    dr = pd.DataFrame({
+        "parameter": ["discount rate"],
+        "value": [discount_rate],
+        "unit": ["p.u."],
+        "source": ["REMIND-EU"],
+        "further description": ["p_r"],
+    })
     dr = dr.merge(no_discount, how="cross")
     return pd.concat([costs, dr], ignore_index=True)
 
@@ -321,33 +331,17 @@ if __name__ == "__main__":
     remind_long = extract_remind_parameter_data(snakemake, mapped_regions)
     baseline_raw = pd.read_csv(snakemake.input["original_costs"])
 
-    mapped_overrides = build_mapped_overrides(
-        technology_mapping,
-        remind_long,
-    )
+    # REMIND-derived overrides keep their region dimension; non-regional overrides are
+    # the same for every region (PyPSA-Eur baseline values and fixed-value entries).
+    regional_mapped_overrides = build_mapped_overrides(technology_mapping, remind_long)
     pypsa_overrides = build_pypsa_default_overrides(technology_mapping, baseline_raw)
     set_overrides = build_set_value_overrides(
         technology_mapping,
         snakemake.input["technology_cost_mapping"],
     )
+    non_regional_overrides = pd.concat([pypsa_overrides, set_overrides], ignore_index=True)
 
-    overrides = pd.concat([mapped_overrides, pypsa_overrides, set_overrides], ignore_index=True)
-    overrides = add_discount_rate(snakemake, overrides, mapped_regions)
-    overrides = convert_investment_to_input_capacity_basis(overrides)
-
-    merged_raw = merge_overrides_into_baseline(baseline_raw, overrides)
-    merged_raw_mapped = merged_raw.loc[merged_raw["technology"].isin(mapped_technologies)].copy()
-    logger.info(
-        "Keeping %d overwritten raw cost rows across %d mapped technologies",
-        len(merged_raw_mapped),
-        merged_raw_mapped["technology"].nunique(),
-    )
-
-    logger.info(
-        "Exporting overwritten raw costs to %s",
-        snakemake.output["costs_raw_overwritten"],
-    )
-    merged_raw_mapped.to_csv(snakemake.output["costs_raw_overwritten"], index=False)
+    discount_rates = get_discount_rates(snakemake, mapped_regions)
 
     n = pypsa.Network(snakemake.input["network"])
     nyears = n.snapshot_weightings.generators.sum() / 8760.0
@@ -356,32 +350,81 @@ if __name__ == "__main__":
     # here to keep `process_cost_data.py` unchanged while calling it from REMIND.
     process_cost_data.snakemake = snakemake
     process_cost_data.planning_horizon = year
-    costs_processed = prepare_costs(
-        costs=merged_raw.set_index(["technology", "parameter"]),
-        config=snakemake.params["costs"],
-        max_hours=snakemake.params["max_hours"],
-        nyears=nyears,
-        custom_costs_fn=snakemake.input.get("custom_costs"),
-    )
-    costs_processed = costs_processed.loc[
-        costs_processed.index.isin(mapped_technologies)
-    ].copy()
+
+    all_raw = []
+    all_processed = []
+
+    for region in sorted(mapped_regions):
+        region_overrides = regional_mapped_overrides[
+            regional_mapped_overrides["region"] == region
+        ].drop(columns="region")
+
+        combined = pd.concat([region_overrides, non_regional_overrides], ignore_index=True)
+        combined = add_discount_rate_for_region(combined, discount_rates[region])
+        combined = convert_investment_to_input_capacity_basis(combined)
+
+        merged_raw = merge_overrides_into_baseline(baseline_raw, combined)
+
+        merged_raw_mapped = merged_raw.loc[merged_raw["technology"].isin(mapped_technologies)].copy()
+        merged_raw_mapped.insert(0, "region", region)
+        all_raw.append(merged_raw_mapped)
+
+        costs_processed = prepare_costs(
+            costs=merged_raw.set_index(["technology", "parameter"]),
+            config=snakemake.params["costs"],
+            max_hours=snakemake.params["max_hours"],
+            nyears=nyears,
+            custom_costs_fn=snakemake.input.get("custom_costs"),
+        )
+        costs_processed = costs_processed.loc[
+            costs_processed.index.isin(mapped_technologies)
+        ].copy()
+        costs_processed.index = pd.MultiIndex.from_tuples(
+            [(region, t) for t in costs_processed.index], names=["region", "technology"]
+        )
+        all_processed.append(costs_processed)
+
+    raw_combined = pd.concat(all_raw, ignore_index=True)
+    processed_combined = pd.concat(all_processed)
+
     logger.info(
-        "Keeping %d processed cost rows across %d mapped technologies",
-        len(costs_processed),
-        costs_processed.index.nunique(),
+        "Keeping %d raw cost rows across %d regions × %d mapped technologies",
+        len(raw_combined),
+        raw_combined["region"].nunique(),
+        raw_combined["technology"].nunique(),
+    )
+    logger.info(
+        "Keeping %d processed cost rows across %d regions × %d mapped technologies",
+        len(processed_combined),
+        processed_combined.index.get_level_values("region").nunique(),
+        processed_combined.index.get_level_values("technology").nunique(),
     )
 
     required_cols = ["capital_cost", "marginal_cost"]
-    missing_required = [c for c in required_cols if c not in costs_processed.columns]
+    missing_required = [c for c in required_cols if c not in processed_combined.columns]
     if missing_required:
         raise ValueError(f"Missing required columns in processed costs: {missing_required}")
-    if costs_processed[required_cols].isna().any().any():
-        nan_cols = list(costs_processed[required_cols].columns[costs_processed[required_cols].isna().any()])
+    if processed_combined[required_cols].isna().any().any():
+        nan_cols = list(processed_combined[required_cols].columns[processed_combined[required_cols].isna().any()])
         raise ValueError(f"NaN values in required processed cost columns: {nan_cols}")
+
+    logger.info(
+        "Exporting overwritten raw costs to %s",
+        snakemake.output["costs_raw_overwritten"],
+    )
+    raw_combined.to_csv(snakemake.output["costs_raw_overwritten"], index=False)
 
     logger.info(
         "Exporting processed costs to %s",
         snakemake.output["costs_processed"],
     )
-    costs_processed.to_csv(snakemake.output["costs_processed"])
+    processed_combined.to_csv(snakemake.output["costs_processed"])
+
+    # Region-averaged flat costs: single-index by technology, used by prepare_network.py
+    # which expects the upstream load_costs() format (index_col=0 → technology index).
+    costs_flat = processed_combined.groupby(level="technology").mean()
+    logger.info(
+        "Exporting flat (region-averaged) processed costs to %s",
+        snakemake.output["costs_processed_flat"],
+    )
+    costs_flat.to_csv(snakemake.output["costs_processed_flat"])

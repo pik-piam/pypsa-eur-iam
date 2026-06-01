@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""REMIND installed-capacity lower-bound constraints for custom extra functionality."""
+"""REMIND installed-capacity bound constraints for custom extra functionality."""
 
 import logging
 
@@ -89,7 +89,7 @@ def _prepare_targets(snakemake) -> pd.Series:
     return targets[targets > 0]
 
 
-def _add_component_lower_bound_constraints(
+def _add_component_bound_constraints(
     n: pypsa.Network,
     component_name: str,
     component_df: pd.DataFrame,
@@ -100,7 +100,12 @@ def _add_component_lower_bound_constraints(
     country_to_region: pd.Series,
     carrier_to_group: pd.Series,
     constraint_name: str,
+    sense: str,
 ) -> None:
+    """Add regional capacity bound constraints for one component type.
+
+    ``sense`` is ``">="`` for a lower bound or ``"<="`` for an upper bound.
+    """
     if targets.empty:
         return
 
@@ -148,7 +153,7 @@ def _add_component_lower_bound_constraints(
         missing = targets[targets > 0]
         if not missing.empty:
             logger.warning(
-                "%s: no extendable assets for %s target groups with positive lower bounds.",
+                "%s: no extendable assets for %s target groups with positive bounds.",
                 component_name,
                 len(missing),
             )
@@ -178,7 +183,7 @@ def _add_component_lower_bound_constraints(
     unconstrained_groups = lhs_groups.difference(targets.index)
     if len(unconstrained_groups):
         logger.info(
-            "%s: %s modeled groups have no installed-capacity lower bound in RHS.",
+            "%s: %s modeled groups have no installed-capacity bound in RHS.",
             component_name,
             len(unconstrained_groups),
         )
@@ -191,10 +196,14 @@ def _add_component_lower_bound_constraints(
         )
         return
 
-    n.model.add_constraints(
-        lhs_total.sel(group=index) >= targets.loc[index].values,
-        name=constraint_name,
-    )
+    lhs = lhs_total.sel(group=index)
+    rhs = targets.loc[index].values
+    if sense == ">=":
+        n.model.add_constraints(lhs >= rhs, name=constraint_name)
+    elif sense == "<=":
+        n.model.add_constraints(lhs <= rhs, name=constraint_name)
+    else:
+        raise ValueError(f"sense must be '>=' or '<=', got {sense!r}")
 
 
 def add_installed_capacity_lower_bound_constraints(n: pypsa.Network, snakemake) -> None:
@@ -209,6 +218,7 @@ def add_installed_capacity_lower_bound_constraints(n: pypsa.Network, snakemake) 
     generators_enabled = bool(capacity_cfg.get("generators", True))
     links_enabled = bool(capacity_cfg.get("links", True))
     stores_enabled = bool(capacity_cfg.get("stores", True))
+    fixed = bool(capacity_cfg.get("fixed", False))
 
     country_to_region = _build_country_to_region_map(snakemake.input["region_mapping"])
     carrier_to_group = _build_carrier_to_technology_group_map(
@@ -216,54 +226,64 @@ def add_installed_capacity_lower_bound_constraints(n: pypsa.Network, snakemake) 
     )
 
     logger.info(
-        "Adding REMIND installed-capacity lower-bound constraints for %s groups.",
+        "Adding REMIND installed-capacity lower-bound constraints for %s groups%s.",
         len(targets),
+        " (fixed: upper bounds also applied)" if fixed else "",
+    )
+
+    common_kwargs = dict(
+        targets=targets,
+        country_to_region=country_to_region,
+        carrier_to_group=carrier_to_group,
     )
 
     if generators_enabled:
-        _add_component_lower_bound_constraints(
-            n=n,
-            component_name="Generator",
-            component_df=n.generators,
-            variable_name="Generator-p_nom",
-            extendable_col="p_nom_extendable",
-            bus_col="bus",
-            targets=targets,
-            country_to_region=country_to_region,
-            carrier_to_group=carrier_to_group,
-            constraint_name="REMIND_installed_capacity_generator_min",
+        _add_component_bound_constraints(
+            n=n, component_name="Generator", component_df=n.generators,
+            variable_name="Generator-p_nom", extendable_col="p_nom_extendable", bus_col="bus",
+            constraint_name="REMIND_installed_capacity_generator_min", sense=">=",
+            **common_kwargs,
         )
+        if fixed:
+            _add_component_bound_constraints(
+                n=n, component_name="Generator", component_df=n.generators,
+                variable_name="Generator-p_nom", extendable_col="p_nom_extendable", bus_col="bus",
+                constraint_name="REMIND_installed_capacity_generator_max", sense="<=",
+                **common_kwargs,
+            )
     else:
         logger.info("Skipping REMIND installed-capacity minimum constraints for generators.")
 
     if links_enabled:
-        _add_component_lower_bound_constraints(
-            n=n,
-            component_name="Link",
-            component_df=n.links,
-            variable_name="Link-p_nom",
-            extendable_col="p_nom_extendable",
-            bus_col="bus0",
-            targets=targets,
-            country_to_region=country_to_region,
-            carrier_to_group=carrier_to_group,
-            constraint_name="REMIND_installed_capacity_link_min",
+        _add_component_bound_constraints(
+            n=n, component_name="Link", component_df=n.links,
+            variable_name="Link-p_nom", extendable_col="p_nom_extendable", bus_col="bus0",
+            constraint_name="REMIND_installed_capacity_link_min", sense=">=",
+            **common_kwargs,
         )
+        if fixed:
+            _add_component_bound_constraints(
+                n=n, component_name="Link", component_df=n.links,
+                variable_name="Link-p_nom", extendable_col="p_nom_extendable", bus_col="bus0",
+                constraint_name="REMIND_installed_capacity_link_max", sense="<=",
+                **common_kwargs,
+            )
     else:
         logger.info("Skipping REMIND installed-capacity minimum constraints for links.")
 
     if stores_enabled:
-        _add_component_lower_bound_constraints(
-            n=n,
-            component_name="Store",
-            component_df=n.stores,
-            variable_name="Store-e_nom",
-            extendable_col="e_nom_extendable",
-            bus_col="bus",
-            targets=targets,
-            country_to_region=country_to_region,
-            carrier_to_group=carrier_to_group,
-            constraint_name="REMIND_installed_capacity_store_min",
+        _add_component_bound_constraints(
+            n=n, component_name="Store", component_df=n.stores,
+            variable_name="Store-e_nom", extendable_col="e_nom_extendable", bus_col="bus",
+            constraint_name="REMIND_installed_capacity_store_min", sense=">=",
+            **common_kwargs,
         )
+        if fixed:
+            _add_component_bound_constraints(
+                n=n, component_name="Store", component_df=n.stores,
+                variable_name="Store-e_nom", extendable_col="e_nom_extendable", bus_col="bus",
+                constraint_name="REMIND_installed_capacity_store_max", sense="<=",
+                **common_kwargs,
+            )
     else:
         logger.info("Skipping REMIND installed-capacity minimum constraints for stores.")
