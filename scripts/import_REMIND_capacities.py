@@ -25,7 +25,26 @@ from _helpers import (
 
 logger = logging.getLogger(__name__)
 
-LINK_TECHNOLOGIES_INPUT_CAPACITY = {"elh2", "h2turb", "btin"}
+LINK_TECHNOLOGIES_INPUT_CAPACITY = {"elh2", "h2turb", "btin", "elh2VRE", "h2turbVRE"}
+
+# VRE-coupled variants map to the same carrier as their primary counterpart.
+# Merged before PyPSA-Eur mapping so the groupby().sum() aggregates them correctly.
+_VRE_TO_PRIMARY = {"elh2VRE": "elh2", "h2turbVRE": "h2turb"}
+
+
+def _merge_vre_technologies(capacities: pd.DataFrame) -> pd.DataFrame:
+    """Rename VRE-coupled h2turb/elh2 variants to their primary REMIND technology names.
+
+    REMIND splits electrolysis and H2 turbines into a base tech (elh2, h2turb) and a
+    VRE-coupled variant (elh2VRE, h2turbVRE). Both represent the same PyPSA-Eur carrier
+    and must be summed for the capacity constraint. Renaming before map_to_pypsa_carriers
+    lets the existing groupby().sum() aggregate them naturally.
+    """
+    capacities = capacities.copy()
+    # Cast to str first to avoid CategoricalDtype replace silently no-oping
+    tech = capacities["remind_technology"].astype(str)
+    capacities["remind_technology"] = tech.map(lambda t: _VRE_TO_PRIMARY.get(t, t))
+    return capacities
 
 
 def load_remind_capacities(fp_remind_data: str) -> pd.DataFrame:
@@ -151,6 +170,9 @@ if __name__ == "__main__":
     logger.info("Loading REMIND capacities...")
     capacities = load_remind_capacities(snakemake.input["remind_data"])
     capacities = filter_to_modeled_regions(capacities, snakemake.input["region_mapping"])
+
+    logger.info("Merging VRE-coupled technology variants (elh2VRE→elh2, h2turbVRE→h2turb)...")
+    capacities = _merge_vre_technologies(capacities)
 
     logger.info("Adjusting capacities for link technologies to input-capacity convention...")
     capacities = adjust_link_capacities_to_input(
