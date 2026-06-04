@@ -81,6 +81,8 @@ rule import_REMIND_demand:
         ITERATION_LOGS + "import_REMIND_demand.log",
     benchmark:
         ITERATION_BENCHMARKS + "import_REMIND_demand"
+    group:
+        "iy"
     script:
         scripts("import_REMIND_demand.py")
 
@@ -100,6 +102,8 @@ rule downscale_REMIND_demand:
         ITERATION_LOGS + "downscale_REMIND_demand.log",
     benchmark:
         ITERATION_BENCHMARKS + "downscale_REMIND_demand"
+    group:
+        "iy"
     script:
         scripts("downscale_REMIND_demand.py")
 
@@ -116,6 +120,8 @@ rule import_REMIND_capacities:
         ITERATION_LOGS + "import_REMIND_capacities.log",
     benchmark:
         ITERATION_BENCHMARKS + "import_REMIND_capacities"
+    group:
+        "iy"
     script:
         scripts("import_REMIND_capacities.py")
 
@@ -130,6 +136,8 @@ rule import_REMIND_co2price:
         ITERATION_LOGS + "import_REMIND_co2price.log",
     benchmark:
         ITERATION_BENCHMARKS + "import_REMIND_co2price"
+    group:
+        "iy"
     script:
         scripts("import_REMIND_co2price.py")
 
@@ -171,6 +179,8 @@ rule import_REMIND_hydro:
         ITERATION_LOGS + "import_REMIND_hydro.log",
     benchmark:
         ITERATION_BENCHMARKS + "import_REMIND_hydro"
+    group:
+        "iy"
     script:
         scripts("import_REMIND_hydro.py")
 
@@ -376,7 +386,7 @@ if USE_GUROBI_TUNNEL_REMIND:
             "iy"
         resources:
             mem_mb=500,
-            runtime="00:05:00",
+            runtime=5,
         script:
             scripts("setup_gurobi_tunnel_REMIND.py")
 
