@@ -21,7 +21,7 @@ cluster-generic-submit-cmd:
     --job-name=smk-{rule}-{wildcards}
     --output=logs_slurm/$SCENARIO/{rule}/{rule}-{wildcards}-%j.out
     --parsable
-    --export=PATH,LD_LIBRARY_PATH,GUROBI_HOME
+    --export=PATH,LD_LIBRARY_PATH,GUROBI_HOME,GRB_LICENSE_FILE
     --exclude=csp14c01  # Exclude node
 cluster-generic-cancel-cmd: scancel
 cluster-generic-status-cmd: "python pik_hpc_profile/slurm-status.py"
@@ -38,11 +38,13 @@ printshellcmds: true
 rerun-incomplete: true
 # Other rerun-triggers can lead to rules trying to access the internet (for retrieve_*) functions
 # which leads to errors due to lack of internet access from non-"io" partitions
-rerun-trigger:
+rerun-triggers:
 - code
 - input
-- mtime
 - params
+# Tell the cached-http storage plugin not to query data.pypsa.org for file metadata.
+# Safe because all PyPSA-Eur remote data is pinned to versioned URLs (e.g. powerplants/0.8.1/).
+storage-cached-http-skip-remote-checks: true
 restart-times: 2
 # Disable snakemake lock
 nolock: true

@@ -75,6 +75,7 @@ ITERATION_RESULTS = SCENARIO_RESULTS + IDIR
 localrules:
     download_and_prepare_REMIND,
     retrieve_ssp_data,
+    cluster_network,  # No SLURM b/c of Gurobi license check and small problem size
     solve_all_networks_REMIND,
     export_to_REMIND
 
@@ -102,8 +103,7 @@ include: "rules/retrieve.smk"
 # Mark them local to avoid submitting trivial copy jobs to SLURM.
 workflow.localrules(*(
     r.name for r in workflow.rules
-    if r.name.startswith(("retrieve_", "download_"))
-    and r.name != "download_and_prepare_REMIND"
+    if r.name.startswith("retrieve_")
 ))
 
 include: "rules/build_electricity.smk"
