@@ -31,9 +31,16 @@ rule retrieve_ssp_data:
 # The --omit from flag makes sure that add_electricity itself isn't called
 rule download_and_prepare_REMIND:
     input:
+        # All input files required for add_electricity
         expand(
             rules.add_electricity.output[0],
             clusters=config["scenario"]["clusters"],
+        ),
+        # Raw technology cost CSVs for all REMIND years (clamped to [2020, 2050] since
+        # technology-data has no extrapolation beyond that range).
+        expand(
+            COSTS_DATASET["folder"] + "/costs_{year}.csv",
+            year=sorted({max(2020, min(y, 2050)) for y in config["remind_coupling"]["years"]}),
         ),
         # SSP data for downscaling
         rules.retrieve_ssp_data.output,
@@ -132,8 +139,8 @@ rule import_REMIND_costs:
         costs=config_provider("costs"),
         max_hours=config_provider("electricity", "max_hours"),
     input:
-        # no TD data for < 2020 and > 2050
-        original_costs=lambda w: f"resources/costs_{max(2020, min(int(w['year_REMIND']), 2050))}.csv",
+        # no TD data for < 2020 and > 2050; raw long-format file retrieved by retrieve_cost_data
+        original_costs=lambda w: COSTS_DATASET["folder"] + f"/costs_{max(2020, min(int(w['year_REMIND']), 2050))}.csv",
         network=resources("networks/base_s.nc"),
         custom_costs=config_provider("costs", "custom_cost_fn"),
         region_mapping="config/regionmapping_21_EU11.csv",
