@@ -21,10 +21,13 @@ rule retrieve_ssp_data:
         scripts("retrieve_ssp_data.py")
 
 
-# Download and prepare all files that are independent of REMIND inputs and
-# require an internet connection on login nodes. Configure Gurobi before running.
+# Download and prepare all files that are independent of REMIND inputs.
+# retrieve_ssp_data is a localrule (needs internet); all other retrieve_* rules
+# use the storage plugin and are downloaded by Snakemake's main process automatically.
+# Configure Gurobi before running:
 #   export GRB_LICENSE_FILE=/p/projects/rd3mod/gurobi.lic
 #   snakemake -s Snakefile_REMIND --c4 download_and_prepare_REMIND --omit-from add_electricity
+# Optionally also add --profile pik_hpc_profile to run on PIK HPC
 # The --omit from flag makes sure that add_electricity itself isn't called
 rule download_and_prepare_REMIND:
     input:

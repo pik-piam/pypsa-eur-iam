@@ -10,7 +10,8 @@ jobs: 500
 # TODO: Make time an argument of resources.XX (didn't work well for grouped jobs so far)
 cluster-generic-submit-cmd:
   export HPC_PARTITION=${{HPC_PARTITION:-priority}} HPC_QOS=${{HPC_QOS:-standby}} &&
-  mkdir -p logs_slurm/{wildcards.scenario}/{rule} &&
+  SCENARIO=$(echo "{wildcards}" | grep -oP '(?<=scen_REMIND=)[^, ]+'); SCENARIO=${{SCENARIO:-prepare}} &&
+  mkdir -p logs_slurm/$SCENARIO/{rule} &&
   sbatch
     --partition=$HPC_PARTITION
     --qos=$HPC_QOS
@@ -18,7 +19,7 @@ cluster-generic-submit-cmd:
     --mem={resources.mem_mb}
     --time='00:20:00'
     --job-name=smk-{rule}-{wildcards}
-    --output=logs_slurm/{wildcards.scenario}/{rule}/{rule}-{wildcards}-%j.out
+    --output=logs_slurm/$SCENARIO/{rule}/{rule}-{wildcards}-%j.out
     --parsable
     --export=PATH,LD_LIBRARY_PATH,GUROBI_HOME
     --exclude=csp14c01  # Exclude node

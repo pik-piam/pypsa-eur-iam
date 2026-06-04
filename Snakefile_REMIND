@@ -74,6 +74,7 @@ ITERATION_RESULTS = SCENARIO_RESULTS + IDIR
 # Rules that are run locally, not via a SLURM job
 localrules:
     download_and_prepare_REMIND,
+    retrieve_ssp_data,
     solve_all_networks_REMIND,
     export_to_REMIND
 
