@@ -102,7 +102,8 @@ def _add_component_bound_constraints(
     constraint_name: str,
     sense: str,
 ) -> None:
-    """Add regional capacity bound constraints for one component type.
+    """
+    Add regional capacity bound constraints for one component type.
 
     ``sense`` is ``">="`` for a lower bound or ``"<="`` for an upper bound.
     """
@@ -206,8 +207,8 @@ def _add_component_bound_constraints(
         raise ValueError(f"sense must be '>=' or '<=', got {sense!r}")
 
 
-def add_installed_capacity_lower_bound_constraints(n: pypsa.Network, snakemake) -> None:
-    """Add REMIND installed-capacity lower-bound constraints by region and technology group."""
+def installed_capacity_constraints_REMIND(n, snapshots, snakemake):
+    """Add REMIND installed-capacity bound constraints by region and technology group."""
     targets = _prepare_targets(snakemake)
     if targets.empty:
         return
@@ -226,7 +227,7 @@ def add_installed_capacity_lower_bound_constraints(n: pypsa.Network, snakemake) 
     )
 
     logger.info(
-        "Adding REMIND installed-capacity lower-bound constraints for %s groups%s.",
+        "Adding REMIND installed-capacity bound constraints for %s groups%s.",
         len(targets),
         " (fixed: upper bounds also applied)" if fixed else "",
     )
@@ -237,53 +238,27 @@ def add_installed_capacity_lower_bound_constraints(n: pypsa.Network, snakemake) 
         carrier_to_group=carrier_to_group,
     )
 
-    if generators_enabled:
-        _add_component_bound_constraints(
-            n=n, component_name="Generator", component_df=n.generators,
-            variable_name="Generator-p_nom", extendable_col="p_nom_extendable", bus_col="bus",
-            constraint_name="REMIND_installed_capacity_generator_min", sense=">=",
-            **common_kwargs,
-        )
-        if fixed:
-            _add_component_bound_constraints(
-                n=n, component_name="Generator", component_df=n.generators,
-                variable_name="Generator-p_nom", extendable_col="p_nom_extendable", bus_col="bus",
-                constraint_name="REMIND_installed_capacity_generator_max", sense="<=",
-                **common_kwargs,
-            )
-    else:
-        logger.info("Skipping REMIND installed-capacity minimum constraints for generators.")
+    components = [
+        ("Generator", n.generators, "Generator-p_nom", "p_nom_extendable", "bus", generators_enabled),
+        ("Link",      n.links,      "Link-p_nom",      "p_nom_extendable", "bus0", links_enabled),
+        ("Store",     n.stores,     "Store-e_nom",      "e_nom_extendable", "bus",  stores_enabled),
+    ]
 
-    if links_enabled:
+    for comp_name, comp_df, var_name, ext_col, bus_col, enabled in components:
+        if not enabled:
+            logger.info("Skipping REMIND installed-capacity minimum constraints for %ss.", comp_name)
+            continue
+        slug = comp_name.lower()
         _add_component_bound_constraints(
-            n=n, component_name="Link", component_df=n.links,
-            variable_name="Link-p_nom", extendable_col="p_nom_extendable", bus_col="bus0",
-            constraint_name="REMIND_installed_capacity_link_min", sense=">=",
+            n=n, component_name=comp_name, component_df=comp_df,
+            variable_name=var_name, extendable_col=ext_col, bus_col=bus_col,
+            constraint_name=f"REMIND_installed_capacity_{slug}_min", sense=">=",
             **common_kwargs,
         )
         if fixed:
             _add_component_bound_constraints(
-                n=n, component_name="Link", component_df=n.links,
-                variable_name="Link-p_nom", extendable_col="p_nom_extendable", bus_col="bus0",
-                constraint_name="REMIND_installed_capacity_link_max", sense="<=",
+                n=n, component_name=comp_name, component_df=comp_df,
+                variable_name=var_name, extendable_col=ext_col, bus_col=bus_col,
+                constraint_name=f"REMIND_installed_capacity_{slug}_max", sense="<=",
                 **common_kwargs,
             )
-    else:
-        logger.info("Skipping REMIND installed-capacity minimum constraints for links.")
-
-    if stores_enabled:
-        _add_component_bound_constraints(
-            n=n, component_name="Store", component_df=n.stores,
-            variable_name="Store-e_nom", extendable_col="e_nom_extendable", bus_col="bus",
-            constraint_name="REMIND_installed_capacity_store_min", sense=">=",
-            **common_kwargs,
-        )
-        if fixed:
-            _add_component_bound_constraints(
-                n=n, component_name="Store", component_df=n.stores,
-                variable_name="Store-e_nom", extendable_col="e_nom_extendable", bus_col="bus",
-                constraint_name="REMIND_installed_capacity_store_max", sense="<=",
-                **common_kwargs,
-            )
-    else:
-        logger.info("Skipping REMIND installed-capacity minimum constraints for stores.")

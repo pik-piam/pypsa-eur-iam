@@ -248,9 +248,9 @@ solving:
   options:
     load_shedding: 1000  # EUR/MWh (default unit at bus)
     # Inject constraints for minimum capacities
-    custom_extra_functionality: ../scripts/remind_extra_constraints.py
+    custom_extra_functionality: ../scripts/installed_capacity_constraints_REMIND.py
   gurobi_hpc_tunnel:
-    use_tunnel: false
+    use_tunnel: true
     tunnel_port: 26998
     login_node: '02'
     timeout_s: 15

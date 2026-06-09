@@ -8,13 +8,14 @@ logging:
 
 # REMIND-specific settings
 remind_coupling:
-  # Coupled years, set by import_REMIND_config.py from the tPy32 set in REMIND2PyPSAEUR.gdx
+  # Coupled years, set by import_REMIND_config.py from the t set in REMIND2PyPSAEUR.gdx
   years: [2030, 2035, 2040, 2045, 2050, 2055, 2060, 2070, 2080, 2090, 2100, 2110, 2130, 2150]
   # Enforce REMIND capacities via constraint in solve_network.py
   installed_capacities:
     generators: true
     links: true
     stores: true
+    fixed: true  # if true, also apply upper bounds — pins regional capacity sums to REMIND values
   # Hydrogen settings
   hydrogen_storage:
     hydrogen_underground_storage_locations:
@@ -79,6 +80,7 @@ remind_coupling:
     # EV_pass: passenger vehicles -> higher population weight
     # EV_freight: freight vehicles -> equal split
     # heatpump/resistive: residential heating -> higher population weight
+    # TODO: Use same weights for downscaling to nodal level within country
     sector_weights:
       AC:
         gdp: 0.6
@@ -103,7 +105,7 @@ remind_coupling:
     z_cutoff: 3
 
 run:
-  name: "DEU_FRA_EWN"
+  name: "Germany"
   disable_progressbar: true
   # Share resources across REMIND scenarios
   shared_resources:
@@ -111,7 +113,7 @@ run:
 
 scenario:
   clusters:
-    - 6
+    - 4
   year:
     - 2025
     - 2030
@@ -146,14 +148,9 @@ scenario:
     - 2130
     - 2150
 
-# Countries covered by REMIND regions DEU, FRA, EWN
+# TODO: Adjust based on regPy32 set from REMIND
 countries:
-  - DE   # DEU
-  - FR   # FRA
-  - AT   # EWN
-  - BE   # EWN
-  - NL   # EWN
-  - LU   # EWN
+  - DE
 
 electricity:
   # Additional technologies introduced to match REMIND
@@ -242,7 +239,7 @@ solving:
   options:
     load_shedding: 1000  # EUR/MWh (default unit at bus)
     # Inject constraints for minimum capacities
-    custom_extra_functionality: ../scripts/remind_extra_constraints.py
+    custom_extra_functionality: ../scripts/installed_capacity_constraints_REMIND.py
   gurobi_hpc_tunnel:
     use_tunnel: false
     tunnel_port: 26998

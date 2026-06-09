@@ -28,6 +28,7 @@ remind_coupling:
     # Add electricity demand for electrolytic hydrogen
     electrolysis:
       enable: true
+      # TODO: Add key for distribution across nodes?
       # Minimum partial load
       p_min_pu: 0.1
       # Ramping limit
@@ -79,6 +80,7 @@ remind_coupling:
     # EV_pass: passenger vehicles -> higher population weight
     # EV_freight: freight vehicles -> equal split
     # heatpump/resistive: residential heating -> higher population weight
+    # TODO: Use same weights for downscaling to nodal level within country
     sector_weights:
       AC:
         gdp: 0.6
@@ -199,6 +201,7 @@ countries:
 electricity:
   # Additional technologies introduced to match REMIND
   extendable_carriers:
+    # TODO: Review solar-hsat, waste, geothermal
     Generator:
       - solar
       - onwind
@@ -247,6 +250,7 @@ electricity:
     - biomass-chp
     - biomass-igcc
     - biomass-igcc-ccs
+  # TODO: What about solar-hsat?
   renewable_carriers:
     - solar
     - onwind
@@ -281,7 +285,7 @@ solving:
   options:
     load_shedding: 1000  # EUR/MWh (default unit at bus)
     # Inject constraints for minimum capacities
-    custom_extra_functionality: ../scripts/remind_extra_constraints.py
+    custom_extra_functionality: ../scripts/installed_capacity_constraints_REMIND.py
   gurobi_hpc_tunnel:
     use_tunnel: false
     tunnel_port: 26998

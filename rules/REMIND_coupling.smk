@@ -91,6 +91,8 @@ rule import_REMIND_demand:
 rule downscale_REMIND_demand:
     params:
         sector_weights=config_provider("remind_coupling", "demand_downscaling", "sector_weights"),
+        countries=config_provider("countries"),
+        years=config_provider("remind_coupling", "years"),
     input:
         sectoral_load=ITERATION_RESOURCES + "sectoral_load.csv",
         population="data/ssp/population.csv",
