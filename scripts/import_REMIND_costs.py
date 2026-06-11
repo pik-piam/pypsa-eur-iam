@@ -33,7 +33,7 @@ def extract_remind_parameter_data(snakemake, mapped_regions: set[str]) -> pd.Dat
     """
     from remind.adapter_remind_eur import LINK_TECHS, RemindEurAdapter
     from rpycpl.io import RemindLoader
-    from rpycpl.symbols import load_symbol_specs
+    from rpycpl.io.remind_symbols import load_symbol_specs
 
     # Bind each argument to a named variable (no inline function calls) so the adapter
     # inputs can be inspected when debugging.

@@ -1,6 +1,6 @@
 """Read installed-capacity targets from REMIND and export them as PyPSA-Eur lower bounds.
 
-Thin wrapper over ``RemindEurAdapter.build_capacity_targets``: reads the capacity symbol
+Thin wrapper over ``RemindEurAdapter.determine_must_build_capacity``: reads the capacity symbol
 (TW -> MW), merges VRE-coupled variants, scales battery techs, adjusts link-like techs to
 input-capacity basis, and maps REMIND techs to PyPSA-Eur carriers. Output identical to the
 previous standalone implementation: [year, region_REMIND, carrier, p_nom_min].
@@ -16,7 +16,7 @@ from _helpers import (
 )
 from remind.adapter_remind_eur import LINK_TECHS, RemindEurAdapter
 from rpycpl.io import RemindLoader
-from rpycpl.symbols import load_symbol_specs
+from rpycpl.io.remind_symbols import load_symbol_specs
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         remind_regions=mapped_regions,
     )
 
-    capacities = adapter.build_capacity_targets(tech_map)
+    capacities = adapter.determine_must_build_capacity(tech_map)
     capacities = (
         capacities[capacities["region"].isin(mapped_regions)]
         .rename(columns={"region": "region_REMIND"})[["year", "region_REMIND", "carrier", "p_nom_min"]]

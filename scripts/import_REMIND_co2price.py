@@ -9,7 +9,7 @@ import logging
 
 from _helpers import configure_logging, get_region_mapping, mock_snakemake
 from rpycpl.io import RemindLoader
-from rpycpl.symbols import load_frame, load_symbol_specs
+from rpycpl.io.remind_symbols import load_frame, load_symbol_specs
 from rpycpl.transforms.co2_prices import convert_co2_prices, extract_co2_prices
 
 logger = logging.getLogger(__name__)
@@ -39,9 +39,11 @@ if __name__ == "__main__":
     raw = load_frame(loader, symbols["co2_price"])
     coupled_years = sorted(load_frame(loader, symbols["coupled_years"])["year"].astype(int).unique())
 
+    # tC→tCO2 is applied by load_frame (symbol config); here only the currency factor.
     co2_price = convert_co2_prices(
         extract_co2_prices(raw, regions=mapped_regions, years=coupled_years),
         currency_factor=1.0,
+        carbon_to_co2=False,
     )
     co2_price = (
         co2_price.rename(columns={"value": "co2_price"})[["region", "year", "co2_price"]]

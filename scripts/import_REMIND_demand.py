@@ -9,7 +9,7 @@ import logging
 
 from _helpers import configure_logging, get_region_mapping, mock_snakemake
 from rpycpl.io import RemindLoader
-from rpycpl.symbols import load_frame, load_symbol_specs
+from rpycpl.io.remind_symbols import load_frame, load_symbol_specs
 from rpycpl.transforms.loads import convert_loads
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,8 @@ if __name__ == "__main__":
     loader = RemindLoader(snakemake.input["remind_data"])
     symbols = load_symbol_specs()
 
-    raw = load_frame(loader, symbols["load_sector"])
-    demand = convert_loads(raw, regions=mapped_regions)
+    raw = load_frame(loader, symbols["load_sector"])  # TWa→MWh applied here (symbol config)
+    demand = convert_loads(raw, regions=mapped_regions, unit_factor=1.0)
 
     demand.to_csv(snakemake.output["sectoral_load"], index=False)
     logger.info("Wrote %s rows of REMIND demand to %s", len(demand), snakemake.output["sectoral_load"])
