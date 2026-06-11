@@ -1,16 +1,17 @@
 """Import a year-level CO2 price pathway from REMIND, per REMIND region.
 
-Thin wrapper over rpycpl: reads the CO2-price symbol (resolved from the central symbol
-config), converts tC->tCO2, filters to mapped REMIND regions and reindexes to the coupled
-years (missing filled with 0). Output identical to the previous standalone implementation.
+Thin wrapper over ``RemindEurAdapter.build_co2_prices``: reads the CO2-price symbol (resolved
+from the central symbol config), converts tC->tCO2, filters to the mapped REMIND regions and
+reindexes to REMIND's coupled-year set (missing filled with 0). Output identical to the
+previous standalone implementation.
 """
 
 import logging
 
 from _helpers import configure_logging, get_region_mapping, mock_snakemake
+from remind.adapter_remind_eur import RemindEurAdapter
 from rpycpl.io import RemindLoader
 from rpycpl.io.remind_symbols import load_frame, load_symbol_specs
-from rpycpl.transforms.co2_prices import convert_co2_prices, extract_co2_prices
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ if __name__ == "__main__":
         )
 
     configure_logging(snakemake)
-    logger.info("Building REMIND CO2 price pathway via rpycpl")
+    logger.info("Building REMIND CO2 price pathway via the rpycpl adapter")
 
     countries = set(snakemake.config["countries"])
     full_mapping = get_region_mapping(
@@ -34,17 +35,20 @@ if __name__ == "__main__":
     mapped_regions = sorted({r for c, rs in full_mapping.items() if c in countries for r in rs if r})
 
     loader = RemindLoader(snakemake.input["remind_data"])
-    symbols = load_symbol_specs()  # EUR default section
+    symbols = load_symbol_specs()
 
-    raw = load_frame(loader, symbols["co2_price"])
+    # CO2 prices are reindexed to REMIND's coupled-year set (the `coupled_years`/`t` symbol);
+    # the adapter uses ``config["planning_horizons"]`` as that year grid.
     coupled_years = sorted(load_frame(loader, symbols["coupled_years"])["year"].astype(int).unique())
-
-    # tC→tCO2 is applied by load_frame (symbol config); here only the currency factor.
-    co2_price = convert_co2_prices(
-        extract_co2_prices(raw, regions=mapped_regions, years=coupled_years),
-        currency_factor=1.0,
-        carbon_to_co2=False,
+    adapter = RemindEurAdapter(
+        loader=loader,
+        symbols=symbols,
+        region_map={},
+        config={"planning_horizons": coupled_years, "currency_factor": 1.0},
+        remind_regions=mapped_regions,
     )
+
+    co2_price = adapter.build_co2_prices()
     co2_price = (
         co2_price.rename(columns={"value": "co2_price"})[["region", "year", "co2_price"]]
         .sort_values(["region", "year"])
