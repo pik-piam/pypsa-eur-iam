@@ -72,6 +72,7 @@ rule download_and_prepare_REMIND:
 
 # Input 1: Read demand data from REMIND and create a csv with the demand for each technology and region.
 rule import_REMIND_demand:
+    """ read and convert units"""
     input:
         remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
         region_mapping="config/regionmapping_21_EU11.csv",
@@ -360,14 +361,6 @@ rule prepare_network_REMIND:
         mem_mb=4000,
     script:
         scripts("prepare_network.py")
-
-
-# Whether the Gurobi SSH tunnel is configured (read by solve_network_with_tunnel_REMIND.py
-# via snakemake.config; kept here only for the cluster_network_REMIND shadow rule below)
-USE_GUROBI_TUNNEL_REMIND = config.get("solving", {}).get("gurobi_hpc_tunnel", {}).get(
-    "use_tunnel", False
-)
-
 
 
 # Solve network for given scenario, iteration and year.
