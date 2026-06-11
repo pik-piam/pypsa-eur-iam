@@ -409,7 +409,8 @@ rule solve_network_REMIND:
     group:
         "iy"
     resources:
-        mem_mb=memory,
+        # Increase requested memory by 50% on each retry (restart-times in profile).
+        mem_mb=lambda wildcards, attempt: int(1.5 ** (attempt - 1) * memory(wildcards)),
         runtime=config_provider("solving", "runtime", default="6h"),
     shadow:
         shadow_config
