@@ -47,4 +47,4 @@ scheduler: greedy
 # now define the resources
 default-resources:
   - mem_mb=1000
-  - runtime=20  # minutes; fallback for rules that don't set their own runtime
+  - runtime=20min  # fallback for rules that don't set their own runtime
