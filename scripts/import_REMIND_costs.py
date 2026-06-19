@@ -1,4 +1,3 @@
-
 """
 Build REMIND-adjusted technology costs for PyPSA-Eur.
 
@@ -21,7 +20,7 @@ import logging
 import pandas as pd
 import pypsa
 from _helpers import configure_logging
-from remind.adapter_remind_eur import LINK_TECHS, RemindEurAdapter
+from rpycpl import CouplingAdapter
 from rpycpl.io import RemindLoader
 from rpycpl.io.remind_symbols import load_symbol_specs
 from rpycpl.transforms.costs import (
@@ -35,18 +34,20 @@ from rpycpl.transforms.mapping import read_region_map as get_region_mapping
 logger = logging.getLogger(__name__)
 
 
-def build_adapter(remind_data_path: str, mapped_regions: set[str]) -> RemindEurAdapter:
-    """Construct the shared ``RemindEurAdapter`` bound to the REMIND GDX + central symbol config.
-
-    The adapter is the single entry point to the coupling package: it owns the loader and the
-    resolved symbol map, exposes ``extract_cost_parameters`` (REMIND cost semantics), and is
-    reused below to read the discount-rate symbol.
+def build_adapter(remind_data_path: str, mapped_regions: set[str]) -> CouplingAdapter:
     """
-    return RemindEurAdapter(
+    Construct the base ``CouplingAdapter`` bound to the REMIND GDX + central symbol config.
+
+    Costs is the one place the adapter earns its keep: it owns the loader and the resolved symbol
+    map, exposes ``extract_cost_parameters`` (REMIND cost semantics) across several reads through
+    one open GDX, and is reused below to read the discount-rate symbol. No subclass is needed —
+    the EUR-specific btin² efficiency tweak is applied inline in ``main`` after extraction.
+    """
+    return CouplingAdapter(
         loader=RemindLoader(remind_data_path),
         symbols=load_symbol_specs(),
         region_map={},
-        config={"link_techs": LINK_TECHS},
+        config={},
         remind_regions=sorted(mapped_regions),
     )
 
@@ -55,7 +56,8 @@ def build_mapped_overrides(
     technology_mapping: pd.DataFrame,
     remind_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Map REMIND parameter values onto PyPSA-Eur carriers via rpycpl's ``build_cost_overrides``.
+    """
+    Map REMIND parameter values onto PyPSA-Eur carriers via rpycpl's ``build_cost_overrides``.
 
     ``build_cost_overrides`` does the 1:1 (region, technology, parameter) lookup, drops mapped
     references that are absent from the GDX (those keep the PyPSA-Eur baseline on merge), and
@@ -77,7 +79,9 @@ def build_mapped_overrides(
             )
 
     overrides["source"] = "REMIND-EU"
-    overrides["further description"] = "Extracted from REMIND-EU model in import_REMIND_costs.py"
+    overrides["further description"] = (
+        "Extracted from REMIND-EU model in import_REMIND_costs.py"
+    )
     return overrides
 
 
@@ -86,9 +90,7 @@ def build_pypsa_default_overrides(
     baseline_raw: pd.DataFrame,
 ) -> pd.DataFrame:
     """Pull parameter values from the PyPSA-Eur baseline costs for rows marked source=PyPSA-Eur."""
-    df = technology_mapping.query(
-        "`source` == 'PyPSA-Eur'"
-    ).drop(columns=["unit"])
+    df = technology_mapping.query("`source` == 'PyPSA-Eur'").drop(columns=["unit"])
     df = df.merge(
         baseline_raw,
         left_on=["PyPSA-Eur technology", "parameter"],
@@ -98,18 +100,26 @@ def build_pypsa_default_overrides(
     )
     df["source"] = "PyPSA-EUR"
     df["further description"] = "Default parameter from PyPSA-EUR baseline cost file"
-    return df[["technology", "parameter", "value", "unit", "source", "further description"]]
+    return df[
+        ["technology", "parameter", "value", "unit", "source", "further description"]
+    ]
 
 
-def build_set_value_overrides(technology_mapping: pd.DataFrame, mapping_file: str) -> pd.DataFrame:
+def build_set_value_overrides(
+    technology_mapping: pd.DataFrame, mapping_file: str
+) -> pd.DataFrame:
     """Return overrides for rows marked source=fixed, converting the reference column to a numeric value."""
-    set_df = technology_mapping.query("`source` == 'fixed'").rename(
-        columns={
-            "PyPSA-Eur technology": "technology",
-            "reference": "value",
-            "comment": "further description",
-        }
-    )[["technology", "parameter", "value", "unit", "further description"]].copy()
+    set_df = (
+        technology_mapping.query("`source` == 'fixed'")
+        .rename(
+            columns={
+                "PyPSA-Eur technology": "technology",
+                "reference": "value",
+                "comment": "further description",
+            }
+        )[["technology", "parameter", "value", "unit", "further description"]]
+        .copy()
+    )
     set_df["value"] = pd.to_numeric(set_df["value"], errors="raise")
     set_df["source"] = f"Set via configuration file: {mapping_file}"
     set_df["further description"] = set_df["further description"].fillna("")
@@ -119,6 +129,7 @@ def build_set_value_overrides(technology_mapping: pd.DataFrame, mapping_file: st
 if __name__ == "__main__":
     import sys
     from pathlib import Path
+
     # When run directly, Python adds scripts/ to sys.path, not the repo root.
     # scripts.process_cost_data must be imported as a package from the repo root,
     # so we insert it explicitly. Not needed under Snakemake (which sets up sys.path correctly).
@@ -142,14 +153,28 @@ if __name__ == "__main__":
     logger.info("Building REMIND-adjusted costs for year %s", year)
 
     countries = set(snakemake.config["countries"])
-    full_mapping = get_region_mapping(snakemake.input["region_mapping"], source="PyPSA-EUR", target="REMIND-EU")
-    mapped_regions = {r for c, rs in full_mapping.items() if c in countries for r in rs if r}
+    full_mapping = get_region_mapping(
+        snakemake.input["region_mapping"], source="PyPSA-EUR", target="REMIND-EU"
+    )
+    mapped_regions = {
+        r for c, rs in full_mapping.items() if c in countries for r in rs if r
+    }
 
     technology_mapping = pd.read_csv(snakemake.input["technology_cost_mapping"])
-    mapped_technologies = set(technology_mapping["PyPSA-Eur technology"].dropna().unique())
+    mapped_technologies = set(
+        technology_mapping["PyPSA-Eur technology"].dropna().unique()
+    )
 
     adapter = build_adapter(snakemake.input["remind_data"], mapped_regions)
     remind_long = adapter.extract_cost_parameters(int(year))
+
+    # btin (battery-inverter) round-trip efficiency: REMIND reports the one-way inverter
+    # efficiency; PyPSA-Eur's two-link battery needs it squared. (Was the EUR adapter override.)
+    is_btin_eff = (remind_long["parameter"] == "efficiency") & (
+        remind_long["reference"] == "btin"
+    )
+    remind_long.loc[is_btin_eff, "value"] **= 2
+
     baseline_raw = pd.read_csv(snakemake.input["original_costs"])
 
     # REMIND-derived overrides keep their region dimension; non-regional overrides are
@@ -160,10 +185,16 @@ if __name__ == "__main__":
         technology_mapping,
         snakemake.input["technology_cost_mapping"],
     )
-    non_regional_overrides = pd.concat([pypsa_overrides, set_overrides], ignore_index=True)
+    non_regional_overrides = pd.concat(
+        [pypsa_overrides, set_overrides], ignore_index=True
+    )
 
     discount_rates = adapter.discount_rates(int(year))
-    logger.info("Regional REMIND discount rates for year %s: %s", year, discount_rates.round(4).to_dict())
+    logger.info(
+        "Regional REMIND discount rates for year %s: %s",
+        year,
+        discount_rates.round(4).to_dict(),
+    )
 
     n = pypsa.Network(snakemake.input["network"])
     nyears = n.snapshot_weightings.generators.sum() / 8760.0
@@ -181,13 +212,19 @@ if __name__ == "__main__":
             regional_mapped_overrides["region"] == region
         ].drop(columns="region")
 
-        combined = pd.concat([region_overrides, non_regional_overrides], ignore_index=True)
-        combined = add_discount_rate(combined, discount_rates[region], source="REMIND-EU", reference="p_r")
+        combined = pd.concat(
+            [region_overrides, non_regional_overrides], ignore_index=True
+        )
+        combined = add_discount_rate(
+            combined, discount_rates[region], source="REMIND-EU", reference="p_r"
+        )
         combined = convert_investment_to_input_capacity_basis(combined)
 
         merged_raw = merge_cost_overrides_into_baseline(baseline_raw, combined)
 
-        merged_raw_mapped = merged_raw.loc[merged_raw["technology"].isin(mapped_technologies)].copy()
+        merged_raw_mapped = merged_raw.loc[
+            merged_raw["technology"].isin(mapped_technologies)
+        ].copy()
         merged_raw_mapped.insert(0, "region", region)
         all_raw.append(merged_raw_mapped)
 
@@ -225,9 +262,15 @@ if __name__ == "__main__":
     required_cols = ["capital_cost", "marginal_cost"]
     missing_required = [c for c in required_cols if c not in processed_combined.columns]
     if missing_required:
-        raise ValueError(f"Missing required columns in processed costs: {missing_required}")
+        raise ValueError(
+            f"Missing required columns in processed costs: {missing_required}"
+        )
     if processed_combined[required_cols].isna().any().any():
-        nan_cols = list(processed_combined[required_cols].columns[processed_combined[required_cols].isna().any()])
+        nan_cols = list(
+            processed_combined[required_cols].columns[
+                processed_combined[required_cols].isna().any()
+            ]
+        )
         raise ValueError(f"NaN values in required processed cost columns: {nan_cols}")
 
     logger.info(

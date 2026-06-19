@@ -932,32 +932,6 @@ def get_technology_mapping(
     return mapping
 
 
-def read_remind_data(file_path, variable_name, rename_columns={}, error_on_empty=True):
-    """
-    Auxiliary function for standardised and cached reading of REMIND-EU data
-    files to pandas.DataFrame.
-
-    Here all values read are considered variable, i.e. use
-    "variable_name" also for what is considered a "parameter" in the GDX
-    file.
-    """
-    from gamspy import Container
-
-    @functools.lru_cache
-    def _read_and_cache_remind_file(fp):
-        return Container(load_from=fp)
-
-    data = _read_and_cache_remind_file(file_path)[variable_name]
-    df = data.records
-
-    if error_on_empty and (df is None or df.empty):
-        raise ValueError(f"{variable_name} is empty. In: {file_path}")
-
-    df = df.rename(columns=rename_columns, errors="raise")
-
-    return df
-
-
 def get_snapshots(
     snapshots: dict, drop_leap_day: bool = False, freq: str = "h", **kwargs
 ) -> pd.DatetimeIndex:
