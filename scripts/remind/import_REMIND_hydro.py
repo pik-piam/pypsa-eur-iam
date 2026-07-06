@@ -1,9 +1,12 @@
 """
 Read REMIND hydro capacity and generation targets and export them for use in PyPSA-Eur.
 
-Reads ``p32_hydroCapacity`` (TW -> MW) and ``p32_hydroGeneration`` (TWa -> MWh/year)
-from the REMIND GDX file, merges them, derives a capacity factor, and filters to
-REMIND regions that overlap with the configured PyPSA-Eur countries.
+Reads ``hydro_capacity`` and ``hydro_generation`` from the REMIND output (GDX or IAMC .mif,
+auto-detected) via the central symbol config — GDX: ``p32_hydroCapacity`` (TW) /
+``p32_hydroGeneration`` (TWa); IAMC: ``Cap|Electricity|Hydro`` (GW) / ``SE|Electricity|Hydro``
+(EJ/yr). Both are converted to MW / MWh-per-year by ``load_frame``. Merges them, derives a
+capacity factor, and filters to REMIND regions that overlap with the configured PyPSA-Eur
+countries.
 """
 
 import logging
@@ -11,10 +14,11 @@ import logging
 import pandas as pd
 from _helpers import (
     configure_logging,
-    get_region_mapping,
     mock_snakemake,
-    read_remind_data,
 )
+from iampypsa.io import RemindLoader
+from iampypsa.io.remind_symbols import load_frame, load_symbol_specs
+from iampypsa.transforms.mapping import read_region_map as get_region_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +34,17 @@ if __name__ == "__main__":
 
     configure_logging(snakemake)
 
-    logger.info("Loading REMIND hydro capacity and generation data...")
+    logger.info(
+        "Loading REMIND hydro capacity and generation data from the iampypsa symbol config..."
+    )
 
-    hydro_capacity = read_remind_data(
-        snakemake.input["remind_data"],
-        "p32_hydroCapacity",
-        rename_columns={"ttot": "year", "all_regi": "region"},
-    )
-    hydro_generation = read_remind_data(
-        snakemake.input["remind_data"],
-        "p32_hydroGeneration",
-        rename_columns={"ttot": "year", "all_regi": "region"},
-    )
+    loader = RemindLoader(snakemake.input["remind_data"])
+    symbols = load_symbol_specs(backend=loader.backend)
+
+    hydro_capacity = load_frame(loader, symbols["hydro_capacity"])  # TW -> MW
+    hydro_generation = load_frame(
+        loader, symbols["hydro_generation"]
+    )  # TWa -> MWh/year
 
     # Aggregate defensively in case additional dimensions are present.
     hydro_capacity = (
@@ -59,20 +62,11 @@ if __name__ == "__main__":
         .rename(columns={"value": "hydro_generation_mwh"})
     )
 
-    # Unit conversions from REMIND outputs.
-    hydro_capacity["hydro_capacity_mw"] *= 1e6  # TW -> MW
-    hydro_generation["hydro_generation_mwh"] *= 1e6 * 8760  # TWa -> MWh/year
-
     region_mapping = get_region_mapping(
-        snakemake.input["region_mapping"],
-        source="PyPSA-EUR",
-        target="REMIND-EU",
+        snakemake.input["region_mapping"], source="country", target="model_region"
     )
     mapped_regions = (
-        pd.Series(region_mapping, name="region")
-        .explode()
-        .dropna()
-        .unique()
+        pd.Series(region_mapping, name="region").explode().dropna().unique()
     )
 
     hydro = hydro_capacity.merge(hydro_generation, on=["year", "region"], how="outer")

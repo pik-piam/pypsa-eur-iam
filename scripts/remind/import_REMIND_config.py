@@ -4,13 +4,14 @@ CLI script to generate a scenario-specific config for REMIND-PyPSA-Eur coupling.
 Must be run before invoking Snakemake.
 
 Usage:
-    python scripts/import_REMIND_config.py \
+    python scripts/remind/import_REMIND_config.py \
         --gdx resources/{scen}/i{iter}/REMIND2PyPSAEUR.gdx \
         --config-remind config/config.remind.yaml
         --config-changes-file config/config.remind_changes.yaml \
         --config-changes-overrides "remind_coupling.battery_storage_e_min_pu=0.2; remind_coupling.sector_coupling.enable_ev=true" \
         --output resources/{scen}/i{iter}/config.remind_scenario.yaml \
 """
+
 import argparse
 import logging
 import sys
@@ -20,7 +21,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _helpers import read_remind_data
+from iampypsa.io import read_gdx_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,8 @@ def apply_overrides(config, override_string, reference_config=None):
         key = key.strip()
         if reference_config is not None and not has_nested_key(reference_config, key):
             logger.warning(
-                "Override key '%s' not found in config.remind.yaml — possible typo?", key
+                "Override key '%s' not found in config.remind.yaml — possible typo?",
+                key,
             )
         set_nested_value(config, key, yaml.safe_load(val.strip()))
         logger.info("Applied override: %s = %s", key, val.strip())
@@ -61,7 +63,7 @@ def apply_overrides(config, override_string, reference_config=None):
 def read_years(gdx_path):
     """Read coupled years from tPy32 set in REMIND config GDX."""
     return sorted(
-        read_remind_data(
+        read_gdx_symbol(
             gdx_path,
             "tPy32",
             rename_columns={"ttot": "year"},
@@ -76,9 +78,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate scenario-specific PyPSA config from REMIND GDX data."
     )
-    parser.add_argument(
-        "--gdx", required=True, help="Path to REMIND2PyPSAEUR.gdx"
-    )
+    parser.add_argument("--gdx", required=True, help="Path to REMIND2PyPSAEUR.gdx")
     parser.add_argument(
         "--config-remind",
         default="config/config.remind.yaml",
@@ -110,14 +110,17 @@ def main():
             reference_config = yaml.safe_load(f) or {}
     else:
         logger.warning(
-            "Reference config '%s' not found; skipping override key validation.", args.config_remind
+            "Reference config '%s' not found; skipping override key validation.",
+            args.config_remind,
         )
 
     with open(args.config_changes_file) as f:
         config = yaml.safe_load(f) or {}
 
     if args.config_changes_overrides:
-        apply_overrides(config, args.config_changes_overrides, reference_config=reference_config)
+        apply_overrides(
+            config, args.config_changes_overrides, reference_config=reference_config
+        )
 
     years = read_years(args.gdx)
     set_nested_value(config, "remind_coupling.years", years)
@@ -125,7 +128,9 @@ def main():
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        yaml.dump(
+            config, f, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
     logger.info("Written to %s", args.output)
 
 

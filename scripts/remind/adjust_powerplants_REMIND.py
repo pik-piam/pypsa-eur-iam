@@ -11,7 +11,8 @@ with the carrier name so that downstream scripts receive consistent carrier labe
 import logging
 
 import pandas as pd
-from _helpers import configure_logging, get_region_mapping, mock_snakemake
+from _helpers import configure_logging, mock_snakemake
+from iampypsa.transforms.mapping import read_region_map as get_region_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def build_scaling_factors(
     )
 
     caps_y = capacities.loc[capacities["year"] == year].copy()
-    caps_y = caps_y.rename(columns={"p_nom_min": "capacity_remind"})
+    caps_y = caps_y.rename(columns={"value": "capacity_remind"})
 
     compare = ppl_grouped.merge(
         caps_y[["region_REMIND", "carrier", "capacity_remind"]],
@@ -153,10 +154,7 @@ if __name__ == "__main__":
     fp_mapping = snakemake.input["technology_mapping"]
 
     region_mapping = get_region_mapping(
-        snakemake.input["region_mapping"],
-        source="PyPSA-EUR",
-        target="REMIND-EU",
-        flatten=True,
+        snakemake.input["region_mapping"], source="country", target="model_region", flatten=True
     )
 
     ppl = ppl.loc[ppl["Country"].isin(snakemake.params["countries"])].copy()

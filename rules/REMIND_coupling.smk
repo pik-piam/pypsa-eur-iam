@@ -5,6 +5,18 @@
 # Additional rules required for REMIND coupling
 # Author: Adrian Odenweller (adrian.odenweller@pik-potsdam.de)
 
+# ---------------------------------------------------------------------------
+# Input-format switch: set remind_coupling.input_format: gdx (default) or iamc
+# in your config to select the REMIND data source. For iamc, also set
+# remind_coupling.input_filename to the actual .mif filename.
+# ---------------------------------------------------------------------------
+_REMIND_INPUT_FORMAT = config.get("remind_coupling", {}).get("input_format", "gdx")
+_REMIND_INPUT_FILENAME = (
+    config.get("remind_coupling", {}).get("input_filename", "REMIND_output.mif")
+    if _REMIND_INPUT_FORMAT == "iamc"
+    else "REMIND2PyPSAEUR.gdx"
+)
+
 rule retrieve_ssp_data:
     params:
         ssp_scenario=config_provider("remind_coupling", "demand_downscaling", "ssp_scenario"),
@@ -60,7 +72,7 @@ rule download_and_prepare_REMIND:
 
 # Before calling PyPSA-Eur the config file is created by import_REMIND_config.py
 #
-#   python scripts/import_REMIND_config.py \
+#   python scripts/remind/import_REMIND_config.py \
 #       --gdx resources/{scen}/i{iter}/REMIND2PyPSAEUR.gdx \
 #       --config-changes-file config/config.remind_changes.yaml \
 #       --config-changes-overrides "key=value; ..." \
@@ -72,9 +84,11 @@ rule download_and_prepare_REMIND:
 
 # Input 1: Read demand data from REMIND and create a csv with the demand for each technology and region.
 rule import_REMIND_demand:
-    """ read and convert units"""
+    params:
+        years=config_provider("remind_coupling", "years"),
+        countries=config_provider("countries"),
     input:
-        remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
+        remind_data=ITERATION_RESOURCES + _REMIND_INPUT_FILENAME,
         region_mapping="config/regionmapping_21_EU11.csv",
     output:
         sectoral_load=ITERATION_RESOURCES + "sectoral_load.csv",
@@ -85,7 +99,7 @@ rule import_REMIND_demand:
     group:
         "iy"
     script:
-        scripts("import_REMIND_demand.py")
+        scripts("remind/import_REMIND_demand.py")
 
 
 # Input 1b: Disaggregate REMIND regional demand to country level using SSP population and GDP weights.
@@ -99,6 +113,7 @@ rule downscale_REMIND_demand:
         population="data/ssp/population.csv",
         gdp="data/ssp/gdp.csv",
         region_mapping="config/regionmapping_21_EU11.csv",
+        remind_data=ITERATION_RESOURCES + _REMIND_INPUT_FILENAME,
     output:
         sectoral_load_country=ITERATION_RESOURCES + "sectoral_load_country.csv",
     log:
@@ -108,13 +123,16 @@ rule downscale_REMIND_demand:
     group:
         "iy"
     script:
-        scripts("downscale_REMIND_demand.py")
+        scripts("remind/downscale_REMIND_demand.py")
 
 
 # Input 2: Read capacity data from REMIND and create a csv with the installed capacities for each technology and region.
 rule import_REMIND_capacities:
+    params:
+        years=config_provider("remind_coupling", "years"),
+        countries=config_provider("countries"),
     input:
-        remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
+        remind_data=ITERATION_RESOURCES + _REMIND_INPUT_FILENAME,
         region_mapping="config/regionmapping_21_EU11.csv",
         technology_cost_mapping="config/technology_cost_mapping.csv",
     output:
@@ -126,12 +144,12 @@ rule import_REMIND_capacities:
     group:
         "iy"
     script:
-        scripts("import_REMIND_capacities.py")
+        scripts("remind/import_REMIND_capacities.py")
 
 # Input 3: Read CO2 price pathway from REMIND and create a csv with year and CO2 price.
 rule import_REMIND_co2price:
     input:
-        remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
+        remind_data=ITERATION_RESOURCES + _REMIND_INPUT_FILENAME,
         region_mapping="config/regionmapping_21_EU11.csv",
     output:
         co2_price=ITERATION_RESOURCES + "co2_price.csv",
@@ -142,7 +160,7 @@ rule import_REMIND_co2price:
     group:
         "iy"
     script:
-        scripts("import_REMIND_co2price.py")
+        scripts("remind/import_REMIND_co2price.py")
 
 # Input 4: Build cost data compatible with the original PyPSA-EUR cost data structure
 rule import_REMIND_costs:
@@ -156,7 +174,7 @@ rule import_REMIND_costs:
         custom_costs=config_provider("costs", "custom_cost_fn"),
         region_mapping="config/regionmapping_21_EU11.csv",
         technology_cost_mapping="config/technology_cost_mapping.csv",
-        remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
+        remind_data=ITERATION_RESOURCES + _REMIND_INPUT_FILENAME,
     output:
         costs_processed=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed.csv",
         costs_processed_flat=ITERATION_RESOURCES + "y{year_REMIND}/costs_processed_flat.csv",
@@ -168,13 +186,13 @@ rule import_REMIND_costs:
     group:
         "iy"
     script:
-        scripts("import_REMIND_costs.py")
+        scripts("remind/import_REMIND_costs.py")
 
-# Input 5: Special case for hydro, read capacity and generation from REMIND.
+# Input 5: Special case for hydro, read capacity and generation from REMIND (GDX or IAMC .mif).
 # In add_electricity_sector_REMIND, hydro infeed and capacity is adjusted to follow REMIND's capacity factor.
 rule import_REMIND_hydro:
     input:
-        remind_data=ITERATION_RESOURCES + "REMIND2PyPSAEUR.gdx",
+        remind_data=ITERATION_RESOURCES + _REMIND_INPUT_FILENAME,
         region_mapping="config/regionmapping_21_EU11.csv",
     output:
         hydro_targets=ITERATION_RESOURCES + "hydro_targets.csv",
@@ -185,7 +203,7 @@ rule import_REMIND_hydro:
     group:
         "iy"
     script:
-        scripts("import_REMIND_hydro.py")
+        scripts("remind/import_REMIND_hydro.py")
 
 # Adjust powerplants database based on REMIND capacities
 rule adjust_powerplants_REMIND:
@@ -205,7 +223,7 @@ rule adjust_powerplants_REMIND:
     group:
         "iy"
     script:
-        scripts("adjust_powerplants_REMIND.py")
+        scripts("remind/adjust_powerplants_REMIND.py")
 
 # New rule to create hourly water heat demand based on BDEW space heating profile
 # This looks more plausible than the flat water heat profile in the BDEW data
@@ -228,7 +246,7 @@ rule build_hourly_water_heat_demand_REMIND:
     benchmark:
         benchmarks("build_hourly_water_heat_demand/total_s_{clusters}")
     script:
-        "../scripts/build_hourly_water_heat_demand_REMIND.py"
+        scripts("remind/build_hourly_water_heat_demand_REMIND.py")
 
 # Helper function for optional EDGE-T fleet file
 def _get_fleet_input(wildcards):
@@ -321,7 +339,7 @@ rule add_electricity_sector_REMIND:
         mem_mb=10000,
         runtime=10,
     script:
-        scripts("add_electricity_sector_REMIND.py")
+        scripts("remind/add_electricity_sector_REMIND.py")
 
 
 # Prepare network, specifically adding the CO2 price
@@ -417,7 +435,7 @@ rule solve_network_REMIND:
     shadow:
         shadow_config
     script:
-        scripts("solve_network_with_tunnel_REMIND.py")
+        scripts("remind/solve_network_with_tunnel_REMIND.py")
 
 
 # Expand rule to solve all networks across years.
@@ -461,4 +479,4 @@ rule export_to_REMIND:
         mem_mb=lambda wildcards, attempt: attempt * 30000,
         runtime=10,
     script:
-        scripts("export_to_REMIND.py")
+        scripts("remind/export_to_REMIND.py")

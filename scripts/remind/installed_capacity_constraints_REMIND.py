@@ -9,18 +9,16 @@ import logging
 import pandas as pd
 import pypsa
 import xarray as xr
+from iampypsa.transforms.mapping import read_region_map as get_region_mapping
 
-from scripts._helpers import get_region_mapping, get_technology_mapping
+from scripts._helpers import get_technology_mapping
 
 logger = logging.getLogger(__name__)
 
 
 def _build_country_to_region_map(fp_region_mapping: str) -> pd.Series:
     mapping = get_region_mapping(
-        fp_region_mapping,
-        source="PyPSA-EUR",
-        target="REMIND-EU",
-        flatten=True,
+        fp_region_mapping, source="country", target="model_region", flatten=True
     )
     return pd.Series(mapping)
 
@@ -70,7 +68,7 @@ def _prepare_targets(snakemake) -> pd.Series:
     capacities = pd.read_csv(snakemake.input["capacities"])
     year = int(snakemake.wildcards.year_REMIND)
 
-    required_columns = {"year", "region_REMIND", "carrier", "p_nom_min"}
+    required_columns = {"year", "region_REMIND", "carrier", "value"}
     missing_columns = required_columns.difference(capacities.columns)
     if missing_columns:
         raise ValueError(
@@ -84,7 +82,7 @@ def _prepare_targets(snakemake) -> pd.Series:
         return pd.Series(dtype=float)
 
     targets = capacities.groupby(["region_REMIND", "carrier"], observed=False)[
-        "p_nom_min"
+        "value"
     ].sum()
     return targets[targets > 0]
 
