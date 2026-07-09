@@ -61,5 +61,5 @@ if __name__ == "__main__":
 
     # Execute the upstream solve script in this process so that env vars set above
     # are inherited by gurobipy when it initialises.
-    _script = Path(__file__).parent / "solve_network.py"
+    _script = Path(__file__).parent.parent / "solve_network.py"
     exec(compile(_script.read_text(), str(_script), "exec"))
