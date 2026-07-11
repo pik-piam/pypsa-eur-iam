@@ -906,7 +906,7 @@ def get_technology_mapping(
         is True).
     """
     from iampypsa.io import build_capacity_reporting_technologies, load_technology_parameters
-    from iampypsa.io.tech_params import iam_name
+    from iampypsa.io.technology_mapping import iam_name
 
     technologies = load_technology_parameters(fn)["technologies"]
     reports_capacity = build_capacity_reporting_technologies()
