@@ -3,11 +3,17 @@
 # SPDX-License-Identifier: MIT
 
 """
-Orchestrator for REMIND-coupled electricity + sector build.
+Orchestrate the REMIND-coupled electricity + sector build.
 
-Design principle:
-- Reuse shared upstream assembly functions from scripts.add_electricity.
-- Add REMIND-specific components via additional functions.
+Two layers, reflected in the phases of ``__main__``:
+1. Upstream-equivalent assembly — the same steps as PyPSA-Eur ``add_electricity``,
+   reusing its functions (imported from ``scripts.add_electricity``) with REMIND
+   inputs/params substituted (regional costs, adjusted power plants, per-bus load
+   scaling); hydro is REMIND-adjusted via ``attach_hydro_remind``.
+2. REMIND overlay — per-node hydrogen storage/conversion (buses, cavern/tank stores,
+   electrolysis and fuel-cell links; no H2 grid) and sector-coupling loads
+   (electrolysis / EV / heat) that upstream ``add_electricity`` never builds, plus a
+   per-region cost override.
 """
 import logging
 from typing import Any
@@ -22,14 +28,11 @@ from scripts.add_electricity import (
     add_co2_emissions,
     add_missing_carriers,
     attach_conventional_generators,
-    attach_existing_batteries,
     attach_load,
-    attach_renewable_powerplants,
     attach_storageunits,
     attach_stores,
     attach_wind_and_solar,
     configure_logging,
-    estimate_renewable_capacities,
     get_snapshots,
     load_and_aggregate_powerplants,
     normed,
@@ -53,6 +56,26 @@ def overwrite_ppl_efficiency_with_costs(ppl: pd.DataFrame, costs: pd.DataFrame) 
     )
     return ppl
 
+
+def build_costs_with_suptech_aliases(costs: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of costs with a fallback row per missing carrier prefix.
+
+    Upstream ``add_co2_emissions`` (scripts.add_electricity) looks up each carrier's
+    ``-``-prefix (e.g. ``gas-chp`` → ``gas``), but REMIND carriers have no bare-prefix
+    rows; alias them to the carrier's own row so the lookup does not raise KeyError.
+
+    The aliasing gives *approximate* CO₂ intensities (all ``coal-*`` share one row);
+    ``overwrite_carrier_co2_intensities`` corrects them before any intensity is used.
+    """
+    costs = costs.copy()
+    for carrier in list(costs.index):
+        suptech = carrier.split("-")[0]
+        if suptech not in costs.index:
+            costs.loc[suptech] = costs.loc[carrier]
+    return costs
+
+
 def fold_sector_into_ac(demand: pd.DataFrame, source_sector: str) -> pd.DataFrame:
     """Re-label a sector as AC and aggregate duplicate rows."""
     demand = demand.copy()
@@ -64,12 +87,15 @@ def fold_sector_into_ac(demand: pd.DataFrame, source_sector: str) -> pd.DataFram
     )
 
 
-def prepare_sectoral_load(snakemake: Any, costs: pd.DataFrame, year: int) -> pd.DataFrame:
+def prepare_sectoral_load(
+    sectoral_load_country_fn: str,
+    sector_coupling: dict,
+    costs: pd.DataFrame,
+    year: int,
+) -> pd.DataFrame:
     """Load and aggregate REMIND sectoral demand according to sector-coupling config."""
-    sectoral_load = pd.read_csv(snakemake.input.sectoral_load_country)
+    sectoral_load = pd.read_csv(sectoral_load_country_fn)
     sectoral_load = sectoral_load.query("year == @year").copy()
-
-    sector_coupling = snakemake.params["sector_coupling"]
 
     if sector_coupling["electrolysis"]["enable"]:
         eta = costs.loc["electrolysis", "efficiency"]
@@ -91,9 +117,10 @@ def prepare_sectoral_load(snakemake: Any, costs: pd.DataFrame, year: int) -> pd.
     )
 
 
-def calculate_load_scaling_factor(
+def compute_load_scaling_per_country(
     n: pypsa.Network,
-    snakemake: Any,
+    busmap_fn: str,
+    load_fn: str,
     sectoral_load: pd.DataFrame,
 ) -> pd.Series:
     """Return a per-country Series (indexed by iso2) scaling AC load to REMIND demand."""
@@ -104,9 +131,9 @@ def calculate_load_scaling_factor(
 
     # Annual MWh per cluster bus: sum the hourly raw demand over time, then apply
     # the busmap (OSM bus names → cluster buses), then aggregate to country level.
-    busmap = pd.read_csv(snakemake.input.busmap, index_col="name").squeeze()
+    busmap = pd.read_csv(busmap_fn, index_col="name").squeeze()
     country_load = (
-        xr.open_dataarray(snakemake.input.load)
+        xr.open_dataarray(load_fn)
         .sum("time")
         .to_pandas()
         .groupby(busmap)
@@ -118,7 +145,6 @@ def calculate_load_scaling_factor(
     per_country = remind_ac / country_load
 
     return per_country
-
 
 
 def _normalize_weights(s: pd.Series) -> pd.Series:
@@ -147,15 +173,10 @@ def _get_country_to_region() -> pd.Series:
 
 
 def _optional_input_path(value: Any) -> str | None:
-    """Coerce a snakemake input value (possibly None or a list) to a string path, or None if absent."""
-    if value is None:
-        return None
+    """Coerce a snakemake input (None, [], [path] or path) to a path string, or None."""
     if isinstance(value, (list, tuple)):
-        if not value:
-            return None
-        value = value[0]
-    path = str(value)
-    return path if path else None
+        value = value[0] if value else None
+    return str(value) if value else None
 
 
 def _fleet_evs_by_node_from_rds(
@@ -164,6 +185,7 @@ def _fleet_evs_by_node_from_rds(
     number_cars: pd.Series,
     year: int,
     kind: str,
+    country_to_region: pd.Series,
 ) -> pd.Series | None:
     """Read BEV fleet sizes from an EDGE-T RDS file and distribute to nodes by REMIND region; None if unavailable."""
     try:
@@ -199,7 +221,6 @@ def _fleet_evs_by_node_from_rds(
     if rows.empty:
         return None
 
-    country_to_region = _get_country_to_region()
     node_country = n.buses["country"].reindex(number_cars.index)
     node_region = node_country.map(country_to_region)
 
@@ -213,6 +234,7 @@ def _fleet_evs_by_node_from_rds(
         if len(region_nodes) == 0:
             continue
         weights = _normalize_weights(number_cars.reindex(region_nodes).fillna(0.0))
+        # EDGE-T reports totVeh in millions of vehicles.
         number_evs.loc[region_nodes] += weights * (float(row["totVeh"]) * 1e6)
         found_any_region = True
 
@@ -241,38 +263,29 @@ def attach_hydrogen_demand_remind(
         return
 
     h2_buses["country"] = h2_buses["location"].map(n.buses["country"])
-
     bus_load = n.loads_t.p_set.sum(axis=0).groupby(n.loads["bus"]).sum()
+    h2_buses["ac_load"] = h2_buses["location"].map(bus_load).fillna(0.0)
 
-    snapshot_hours = float(n.snapshot_weightings.generators.sum())
-    if snapshot_hours <= 0:
-        snapshot_hours = 8760.0
+    # Split each country's H2 demand across its H2 buses in proportion to the parent
+    # AC bus's annual load (uniform if a country's AC load is all zero).
+    h2_buses["weight"] = h2_buses.groupby("country")["ac_load"].transform(_normalize_weights)
 
-    attached = 0
-    for country, demand_mwh in h2_demand.items():
-        country_h2 = h2_buses[h2_buses["country"] == country]
-        if country_h2.empty:
-            continue
+    # REMIND gives annual H2 energy (MWh); a static Load needs constant power (MW), so
+    # divide by the represented hours over the horizon (snapshot weightings sum, ≈ 8760).
+    total_hours = float(n.snapshot_weightings.generators.sum())
+    h2_buses["p_set"] = (
+        h2_buses["country"].map(h2_demand).fillna(0.0) * h2_buses["weight"] / total_hours
+    )
 
-        country_ac = country_h2["location"].dropna().astype(str)
-        weights = _normalize_weights(bus_load.reindex(country_ac).fillna(0.0))
-        if weights.empty:
-            continue
-
-        for bus, row in country_h2.iterrows():
-            w = float(weights.get(str(row["location"]), 0.0))
-            if w <= 0:
-                continue
-            n.add(
-                "Load",
-                f"{bus} demand REMIND",
-                carrier="H2",
-                bus=bus,
-                p_set=float(demand_mwh) * w / snapshot_hours,
-            )
-            attached += 1
-
-    logger.info("Attached REMIND hydrogen demand to %s H2 loads.", attached)
+    h2_buses = h2_buses[h2_buses["p_set"] > 0]
+    n.add(
+        "Load",
+        h2_buses.index + " demand REMIND",
+        carrier="H2",
+        bus=h2_buses.index,
+        p_set=h2_buses["p_set"].values,
+    )
+    logger.info("Attached REMIND hydrogen demand to %s H2 loads.", len(h2_buses))
 
 
 def cycling_shift(df: pd.DataFrame, steps: int = 1) -> pd.DataFrame:
@@ -280,6 +293,30 @@ def cycling_shift(df: pd.DataFrame, steps: int = 1) -> pd.DataFrame:
     shifted = df.copy()
     shifted.values[:] = shifted.reindex(index=np.roll(shifted.index, steps)).values
     return shifted
+
+
+def distribute_annual_demand(
+    demand_by_country: pd.Series,
+    profile: pd.DataFrame,
+    node_country: pd.Series,
+) -> pd.DataFrame:
+    """
+    Shape each country's annual demand onto its nodes using an hourly profile.
+
+    Per country, the profile columns of its nodes are rescaled so their summed energy
+    equals the country demand; countries with no nodes or a zero-sum profile give zero.
+    """
+    out = pd.DataFrame(0.0, index=profile.index, columns=profile.columns)
+    for country, demand in demand_by_country.items():
+        cnodes = node_country[node_country == country].index.intersection(profile.columns)
+        if cnodes.empty:
+            logger.warning("No nodes for country %s in demand profile; skipping.", country)
+            continue
+        total = float(profile[cnodes].to_numpy().sum())
+        if total <= 0:
+            continue
+        out[cnodes] = profile[cnodes] * (demand / total)
+    return out
 
 
 def attach_ev_demand_remind(
@@ -295,6 +332,7 @@ def attach_ev_demand_remind(
     fleet_file: str | list,
     year: int,
     kind: str,
+    country_to_region: pd.Series,
 ) -> None:
     """
     Add EV demand, charging links, and optional DSM stores for passenger or freight vehicles.
@@ -320,12 +358,14 @@ def attach_ev_demand_remind(
         return
     transport = transport[common_cols].fillna(0.0)
 
+    # Fill any residual gaps with the heating deadband's lower bound, where
+    # transport_degree_factor yields no demand adjustment (neutral).
     temperature = xr.open_dataarray(temp_air_total_fn).to_pandas()
     temperature = (
         temperature.reindex(index=n.snapshots, columns=common_cols)
         .ffill()
         .bfill()
-        .fillna(15.0)
+        .fillna(options_sector["transport_heating_deadband_lower"])
     )
     dd = transport_degree_factor(
         temperature,
@@ -340,17 +380,7 @@ def attach_ev_demand_remind(
         sectoral_load.query("sector == @sector").set_index("region")["value"]
     )
     node_country = n.buses.loc[common_cols, "country"]
-    load_p_set = pd.DataFrame(0.0, index=n.snapshots, columns=common_cols)
-    for country, demand in demand_by_country.items():
-        cnodes = node_country[node_country == country].index.intersection(transport.columns)
-        if cnodes.empty:
-            logger.warning("No nodes for country %s in EV %s profile; skipping.", country, sector)
-            continue
-        country_sum = float(transport[cnodes].to_numpy().sum())
-        if country_sum <= 0:
-            logger.warning("EV %s transport profile sum zero for %s; skipping.", sector, country)
-            continue
-        load_p_set[cnodes] = transport[cnodes] * (demand / country_sum)
+    load_p_set = distribute_annual_demand(demand_by_country, transport, node_country)
 
     transport_data = pd.read_csv(transport_data_fn, index_col=0)
     number_cars = transport_data["number cars"].reindex(common_cols).fillna(0.0)
@@ -365,6 +395,7 @@ def attach_ev_demand_remind(
             number_cars,
             year,
             kind,
+            country_to_region,
         )
         if number_evs is not None:
             number_evs = number_evs.reindex(common_cols).fillna(0.0)
@@ -467,11 +498,15 @@ def attach_heat_demand_remind(
 
     spatial_nodes = n.buses.query("carrier == 'AC'").index
     wh_share = pd.read_csv(wh_share_fn)
-    wh_year = min(int(year), 2100)
+    wh_year = min(int(year), 2100)  # wh_share data stops at 2100
     wh = wh_share[wh_share["year"] == wh_year]
     item = "heat pumps" if kind == "heatpump" else "resistive heating"
     wh = wh[wh["item"] == item]
-    water_share = float(wh["value"].iloc[0]) if not wh.empty else 0.2
+    if wh.empty:
+        raise ValueError(
+            f"No water-heating share for item={item!r}, year={wh_year} in {wh_share_fn}"
+        )
+    water_share = float(wh["value"].iloc[0])
 
     space_ds = xr.open_dataset(hourly_heat_demand_fn)
     space_heat = (space_ds["residential space"] + space_ds["services space"]).to_pandas()
@@ -488,6 +523,8 @@ def attach_heat_demand_remind(
         if cop_profiles_fn is None:
             raise ValueError("cop_profiles_fn is required for heatpump demand")
         cop = xr.open_dataarray(cop_profiles_fn)
+        # REMIND-specific: fill nodes/timesteps missing after reindex with COP=1
+        # (heat pump degrades to resistive). Upstream cop profiles span all nodes.
         cop = (
             cop.sel(heat_system="rural", heat_source="air")
             .to_pandas()
@@ -498,18 +535,11 @@ def attach_heat_demand_remind(
         water_heat = water_heat / cop
 
     node_country = n.buses.loc[spatial_nodes, "country"]
-    total_elec_profile = pd.DataFrame(0.0, index=n.snapshots, columns=spatial_nodes)
-    for country, demand in demand_by_country.items():
-        cnodes = node_country[node_country == country].index.intersection(space_heat.columns)
-        if cnodes.empty:
-            logger.warning("No nodes for country %s in %s profile; skipping.", country, kind)
-            continue
-        space_sum = float(space_heat[cnodes].to_numpy().sum())
-        water_sum = float(water_heat[cnodes].to_numpy().sum())
-        if space_sum > 0:
-            total_elec_profile[cnodes] += space_heat[cnodes] * (demand * (1.0 - water_share) / space_sum)
-        if water_sum > 0:
-            total_elec_profile[cnodes] += water_heat[cnodes] * (demand * water_share / water_sum)
+    total_elec_profile = distribute_annual_demand(
+        demand_by_country * (1.0 - water_share), space_heat, node_country
+    ) + distribute_annual_demand(
+        demand_by_country * water_share, water_heat, node_country
+    )
 
     carrier = f"{kind} electricity"
     heat_nodes = spatial_nodes + f" {carrier}"
@@ -555,7 +585,7 @@ def attach_heat_demand_remind(
             p_therm_max = total_heat_profile.max(axis=0).fillna(0.0)
             e_therm = p_therm_max * ep_ratio
 
-            cop_safe = cop.clip(lower=1e-6)
+            cop_safe = cop.clip(lower=0.001)  # div-by-zero guard, matching upstream
             elec_storage = e_therm / cop_safe
             size_store = elec_storage.max(axis=0).fillna(0.0)
             max_pu_store = (elec_storage / size_store.replace(0.0, np.nan)).fillna(0.0)
@@ -596,7 +626,8 @@ def attach_hydro_remind(
     carriers: list,
     hydro_targets_fn: str,
     year: int,
-    **params,
+    country_to_region: pd.Series,
+    **hydro_params,
 ) -> None:
     """
     Attach hydro following the upstream attach_hydro flow, with two REMIND-specific injections:
@@ -609,97 +640,72 @@ def attach_hydro_remind(
     phs = ppl.query('carrier == "PHS"').copy()
     hydro = ppl.query('carrier == "hydro"').copy()
 
-    if ror.empty and hydro.empty:
-        if "PHS" in carriers and not phs.empty:
-            max_hours = params.get("PHS_max_hours", 6)
-            phs = phs.replace({"max_hours": {0: max_hours, np.nan: max_hours}})
-            n.add(
-                "StorageUnit",
-                phs.index,
-                carrier="PHS",
-                bus=phs["bus"],
-                p_nom=phs["p_nom"],
-                capital_cost=costs.at["PHS", "capital_cost"],
-                max_hours=phs["max_hours"],
-                efficiency_store=np.sqrt(costs.at["PHS", "efficiency"]),
-                efficiency_dispatch=np.sqrt(costs.at["PHS", "efficiency"]),
-                cyclic_state_of_charge=True,
-            )
-        return
-
-    # Build country/region labels for hydro assets.
-    hydro_assets = pd.concat([ror, hydro], axis=0)
-    hydro_assets["country"] = hydro_assets["bus"].map(n.buses.country)
-
-    region_mapping = get_region_mapping(source="country", target="model_region")
-    country_to_region = pd.Series(region_mapping).map(_to_scalar_region)
-    hydro_assets["region"] = hydro_assets["country"].map(country_to_region)
-
-    hydro_targets = pd.read_csv(hydro_targets_fn)
-    hydro_targets["year"] = hydro_targets["year"].astype(str)
-    hydro_targets_year = hydro_targets[hydro_targets["year"] == str(year)].copy()
-
-    if hydro_targets_year.empty:
-        logger.warning(
-            "No REMIND hydro targets found for year %s in %s. Using upstream hydro behaviour.",
-            year,
-            hydro_targets_fn,
-        )
-        hydro_targets_year = pd.DataFrame(
-            columns=["region", "hydro_capacity_mw", "hydro_generation_mwh"]
-        )
-
-    target_capacity = (
-        hydro_targets_year.groupby("region", observed=False)["hydro_capacity_mw"]
-        .sum()
-        .astype(float)
-    )
-    target_generation = (
-        hydro_targets_year.groupby("region", observed=False)["hydro_generation_mwh"]
-        .sum()
-        .astype(float)
-    )
-
-    # 1) Capacity scaling by REMIND region.
-    current_capacity = hydro_assets.groupby("region", observed=False)["p_nom"].sum()
-    capacity_factor = (target_capacity / current_capacity).replace([np.inf, -np.inf], np.nan)
-    capacity_factor = capacity_factor.fillna(1.0)
-    hydro_assets["cap_factor"] = hydro_assets["region"].map(capacity_factor).fillna(1.0)
-    hydro_assets["p_nom"] = hydro_assets["p_nom"] * hydro_assets["cap_factor"]
-
-    # Push adjusted p_nom back to ror/hydro tables.
-    ror.loc[hydro_assets.loc[ror.index].index, "p_nom"] = hydro_assets.loc[ror.index, "p_nom"]
-    hydro.loc[hydro_assets.loc[hydro.index].index, "p_nom"] = hydro_assets.loc[hydro.index, "p_nom"]
-
+    # Region-scaling and inflow need ror/hydro assets. When only PHS exists (both empty),
+    # skip straight to the add-blocks below
     inflow_idx = ror.index.union(hydro.index)
-    country = hydro_assets["country"]
+    if not inflow_idx.empty:
+        # Build country/region labels for hydro assets.
+        hydro_assets = pd.concat([ror, hydro], axis=0)
+        hydro_assets["country"] = hydro_assets["bus"].map(n.buses.country)
+        hydro_assets["region"] = hydro_assets["country"].map(country_to_region)
 
-    dist_key = hydro_assets.loc[inflow_idx, "p_nom"].groupby(country.loc[inflow_idx]).transform(normed)
+        hydro_targets = pd.read_csv(hydro_targets_fn)
+        hydro_targets["year"] = hydro_targets["year"].astype(str)
+        hydro_targets_year = hydro_targets[hydro_targets["year"] == str(year)]
+        if hydro_targets_year.empty:
+            raise ValueError(
+                f"No REMIND hydro targets for year {year} in {hydro_targets_fn}"
+            )
 
-    with xr.open_dataarray(profile_hydro) as inflow:
-        inflow_countries = pd.Index(country.loc[inflow_idx])
-        missing_c = inflow_countries.unique().difference(inflow.indexes["countries"])
-        assert missing_c.empty, (
-            f"'{profile_hydro}' is missing "
-            f"inflow time-series for at least one country: {', '.join(missing_c)}"
+        target_capacity = (
+            hydro_targets_year.groupby("region", observed=False)["hydro_capacity_mw"]
+            .sum()
+            .astype(float)
+        )
+        target_generation = (
+            hydro_targets_year.groupby("region", observed=False)["hydro_generation_mwh"]
+            .sum()
+            .astype(float)
         )
 
-        inflow_t = (
-            inflow.sel(countries=inflow_countries)
-            .rename({"countries": "name"})
-            .assign_coords(name=inflow_idx)
-            .transpose("time", "name")
-            .to_pandas()
-            .multiply(dist_key, axis=1)
-        )
+        # 1) Capacity scaling by REMIND region.
+        current_capacity = hydro_assets.groupby("region", observed=False)["p_nom"].sum()
+        capacity_factor = (target_capacity / current_capacity).replace([np.inf, -np.inf], np.nan)
+        capacity_factor = capacity_factor.fillna(1.0)
+        hydro_assets["cap_factor"] = hydro_assets["region"].map(capacity_factor).fillna(1.0)
+        hydro_assets["p_nom"] = hydro_assets["p_nom"] * hydro_assets["cap_factor"]
 
-    # 2) Inflow energy scaling by REMIND region.
-    asset_region = hydro_assets.loc[inflow_idx, "region"]
-    current_generation = inflow_t.T.groupby(asset_region).sum().sum(axis=1)
-    generation_factor = (target_generation / current_generation).replace([np.inf, -np.inf], np.nan)
-    generation_factor = generation_factor.fillna(1.0)
-    inflow_factor = asset_region.map(generation_factor).fillna(1.0)
-    inflow_t = inflow_t.multiply(inflow_factor, axis=1)
+        # Push adjusted p_nom back to ror/hydro tables.
+        ror.loc[hydro_assets.loc[ror.index].index, "p_nom"] = hydro_assets.loc[ror.index, "p_nom"]
+        hydro.loc[hydro_assets.loc[hydro.index].index, "p_nom"] = hydro_assets.loc[hydro.index, "p_nom"]
+
+        country = hydro_assets["country"]
+        dist_key = hydro_assets.loc[inflow_idx, "p_nom"].groupby(country.loc[inflow_idx]).transform(normed)
+
+        with xr.open_dataarray(profile_hydro) as inflow:
+            inflow_countries = pd.Index(country.loc[inflow_idx])
+            missing_c = inflow_countries.unique().difference(inflow.indexes["countries"])
+            assert missing_c.empty, (
+                f"'{profile_hydro}' is missing "
+                f"inflow time-series for at least one country: {', '.join(missing_c)}"
+            )
+
+            inflow_t = (
+                inflow.sel(countries=inflow_countries)
+                .rename({"countries": "name"})
+                .assign_coords(name=inflow_idx)
+                .transpose("time", "name")
+                .to_pandas()
+                .multiply(dist_key, axis=1)
+            )
+
+        # 2) Inflow energy scaling by REMIND region.
+        asset_region = hydro_assets.loc[inflow_idx, "region"]
+        current_generation = inflow_t.T.groupby(asset_region).sum().sum(axis=1)
+        generation_factor = (target_generation / current_generation).replace([np.inf, -np.inf], np.nan)
+        generation_factor = generation_factor.fillna(1.0)
+        inflow_factor = asset_region.map(generation_factor).fillna(1.0)
+        inflow_t = inflow_t.multiply(inflow_factor, axis=1)
 
     if "ror" in carriers and not ror.empty:
         n.add(
@@ -719,7 +725,7 @@ def attach_hydro_remind(
         )
 
     if "PHS" in carriers and not phs.empty:
-        max_hours = params.get("PHS_max_hours", 6)
+        max_hours = hydro_params.get("PHS_max_hours", 6)
         phs = phs.replace({"max_hours": {0: max_hours, np.nan: max_hours}})
         n.add(
             "StorageUnit",
@@ -735,7 +741,7 @@ def attach_hydro_remind(
         )
 
     if "hydro" in carriers and not hydro.empty:
-        hydro_max_hours = params.get("hydro_max_hours")
+        hydro_max_hours = hydro_params.get("hydro_max_hours")
 
         assert hydro_capacities is not None, "No path for hydro capacities given."
 
@@ -777,8 +783,8 @@ def attach_hydro_remind(
             hydro.country.map(max_hours_country),
         ).fillna(6)
 
-        if params.get("flatten_dispatch", False):
-            buffer = params.get("flatten_dispatch_buffer", 0.2)
+        if hydro_params.get("flatten_dispatch", False):
+            buffer = hydro_params.get("flatten_dispatch_buffer", 0.2)
             average_capacity_factor = inflow_t[hydro.index].mean() / hydro["p_nom"]
             p_max_pu = (average_capacity_factor + buffer).clip(upper=1)
         else:
@@ -804,13 +810,12 @@ def attach_hydro_remind(
 
 def attach_hydrogen_storage_remind(
     n: pypsa.Network,
-    snakemake: Any,
     costs: pd.DataFrame,
+    h2_cavern_fn: str,
+    storage_settings: dict,
+    electrolysis_settings: dict,
 ) -> None:
     """Attach REMIND hydrogen buses, storage, and conversion links."""
-    storage_settings = snakemake.params["h2_settings"]
-    electrolysis_settings = snakemake.params["sector_coupling"]["electrolysis"]
-
     ac_buses = n.buses.query("carrier == 'AC'").index
     if ac_buses.empty:
         logger.info("No AC buses available for REMIND hydrogen infrastructure.")
@@ -829,25 +834,26 @@ def attach_hydrogen_storage_remind(
         y=n.buses.loc[ac_buses, "y"].values,
     )
 
-    h2_caverns = pd.read_csv(snakemake.input.h2_cavern, index_col=0)
+    h2_caverns = pd.read_csv(h2_cavern_fn, index_col=0)
     enabled_types = [
         cavern_type
         for cavern_type in storage_settings["hydrogen_underground_storage_locations"]
         if cavern_type in h2_caverns.columns
     ]
     if enabled_types:
-        h2_caverns = h2_caverns[enabled_types].sum(axis=1)
-        h2_caverns = h2_caverns[h2_caverns > 2]
-        h2_caverns = h2_caverns * 1e6
-        h2_caverns.clip(upper=1e9, inplace=True)
+        # Salt-cavern potentials are in TWh; keep sizeable sites (> 2 TWh), convert to
+        # MWh, and cap per node.
+        cavern_twh = h2_caverns[enabled_types].sum(axis=1)
+        cavern_twh = cavern_twh[cavern_twh > 2]
+        cavern_capacity_mwh = (cavern_twh * 1e6).clip(upper=1e9)
     else:
-        h2_caverns = pd.Series(dtype=float)
+        cavern_capacity_mwh = pd.Series(dtype=float)
 
     h2_cavern_buses = pd.Index([])
-    if not h2_caverns.empty:
+    if not cavern_capacity_mwh.empty:
         underground_capital_cost = costs.at["hydrogen storage underground", "capital_cost"]
         underground_lifetime = costs.at["hydrogen storage underground", "lifetime"]
-        h2_cavern_buses = h2_caverns.index.intersection(ac_buses)
+        h2_cavern_buses = cavern_capacity_mwh.index.intersection(ac_buses)
 
         n.add(
             "Store",
@@ -855,14 +861,14 @@ def attach_hydrogen_storage_remind(
             bus=h2_cavern_buses.map(lambda bus: f"{bus} H2"),
             carrier="H2 Store",
             e_nom_extendable=True,
-            e_nom_max=h2_caverns.reindex(h2_cavern_buses).values,
+            e_nom_max=cavern_capacity_mwh.reindex(h2_cavern_buses).values,
             e_cyclic=True,
             capital_cost=underground_capital_cost,
             lifetime=underground_lifetime,
         )
 
     tank_tech = "hydrogen storage tank type 1 including compressor"
-    tank_buses = ac_buses.difference(h2_caverns.index)
+    tank_buses = ac_buses.difference(cavern_capacity_mwh.index)
     if not tank_buses.empty:
         n.add(
             "Store",
@@ -903,6 +909,7 @@ def attach_hydrogen_storage_remind(
         carrier="H2 Fuel Cell",
         p_nom_extendable=True,
         efficiency=costs.at["fuel cell", "efficiency"],
+        # NB: fuel cell investment cost is per MWel, so scale by efficiency (per MWH2 in).
         capital_cost=costs.at["fuel cell", "capital_cost"] * costs.at["fuel cell", "efficiency"],
         marginal_cost=costs.at["fuel cell", "marginal_cost"],
         lifetime=costs.at["fuel cell", "lifetime"],
@@ -954,7 +961,8 @@ def apply_regional_costs(
 
     # Add regional CO₂ cost contribution to generator marginal costs.
     # This replaces the global add_emission_prices() that prepare_network.py would
-    # otherwise call; emission_prices.enable is set to False in _remind_emission_prices.
+    # otherwise call; kept consistent via costs.emission_prices.enable: false in
+    # config/config.remind.yaml.
     if not n.generators.empty and co2_price_by_region:
         countries = n.buses.loc[n.generators["bus"], "country"].values
         regions = pd.Series(countries, index=n.generators.index).map(country_to_region)
@@ -974,22 +982,51 @@ def apply_regional_costs(
     logger.info("Applied regional REMIND costs to all network components.")
 
 
+def apply_battery_e_min_pu(
+    n: pypsa.Network, battery_settings: dict, extendable_carriers: dict
+) -> None:
+    """Set a minimum state-of-charge on battery stores from REMIND battery settings."""
+    if "e_min_pu" in battery_settings and "battery" in extendable_carriers["Store"]:
+        e_min_pu = battery_settings["e_min_pu"]
+        battery_mask = n.stores["carrier"] == "battery"
+        n.stores.loc[battery_mask, "e_min_pu"] = e_min_pu
+        logger.info(f"Applied REMIND battery e_min_pu constraint: {e_min_pu}")
+
+
+def overwrite_carrier_co2_intensities(n: pypsa.Network, costs: pd.DataFrame) -> None:
+    """
+    Set each carrier's CO₂ intensity from its full-name cost row.
+
+    Corrects the suptech-prefix approximation from ``build_costs_with_suptech_aliases``,
+    which conflates e.g. biomass-chp and biomass-igcc-ccs (BECCS is carbon-negative).
+    """
+    for carrier in costs.index:
+        if carrier in n.carriers.index and not pd.isna(
+            costs.at[carrier, "CO2 intensity"]
+        ):
+            n.carriers.at[carrier, "co2_emissions"] = costs.at[carrier, "CO2 intensity"]
+
+
 if __name__ == "__main__":
     if "snakemake" not in globals():
         from scripts._helpers import mock_snakemake
 
         snakemake = mock_snakemake(
             "add_electricity_sector_REMIND",
-            scen_REMIND="TEST_multiregion",
+            scen_REMIND="PkBudg1000_DE_TEST",
             iter_REMIND="1",
-            year_REMIND="2030",
+            year_REMIND="2050",
             clusters=4,
-            configfiles="config/config.remind_multiregion.yaml",
+            configfiles="config/config.remind_de.yaml",
         )
 
     configure_logging(snakemake)  # pylint: disable=E0606
     set_scenario_config(snakemake)
 
+    # ------------------------------------------------------------------
+    # Setup: network, snapshots, REMIND costs / CO₂ prices / region map,
+    # power plants, and the per-bus load scaling to REMIND demand.
+    # ------------------------------------------------------------------
     params = snakemake.params
     max_hours = params.electricity["max_hours"]
     year = int(snakemake.wildcards.year_REMIND)
@@ -998,6 +1035,14 @@ if __name__ == "__main__":
         for tech, settings in params.renewable.items()
         if "landfall_length" in settings.keys()
     }
+
+    # Not supported in the REMIND build.
+    assert not params.electricity["estimate_renewable_capacities"]["enable"], (
+        "estimate_renewable_capacities is not supported in the REMIND build"
+    )
+    assert not params.electricity.get("estimate_battery_capacities", False), (
+        "estimate_battery_capacities is not supported in the REMIND build"
+    )
 
     n = pypsa.Network(snakemake.input.base_network)
 
@@ -1026,29 +1071,16 @@ if __name__ == "__main__":
         params.aggregation_strategies,
         params.exclude_carriers,
     )
-
-    # Overwrite plant-specific efficiencies with REMIND efficiencies
     ppl = overwrite_ppl_efficiency_with_costs(ppl, costs)
 
-    # REMIND specific
-    sectoral_load = prepare_sectoral_load(snakemake, costs, year=year)
-    load_scaling_per_country = calculate_load_scaling_factor(n, snakemake, sectoral_load)
+    sector_coupling = snakemake.params["sector_coupling"]
+    sectoral_load = prepare_sectoral_load(
+        snakemake.input.sectoral_load_country, sector_coupling, costs, year=year
+    )
+    load_scaling_per_country = compute_load_scaling_per_country(
+        n, snakemake.input.busmap, snakemake.input.load, sectoral_load
+    )
     load_scaling_per_bus = n.buses["country"].map(load_scaling_per_country)
-
-    # Attach AC load, other loads are attached below
-    attach_load(
-        n,
-        snakemake.input.load,
-        snakemake.input.busmap,
-        load_scaling_per_bus,
-    )
-
-    set_transmission_costs(
-        n,
-        costs,
-        params.line_length_factor,
-        params.link_length_factor,
-    )
 
     renewable_carriers = set(params.electricity["renewable_carriers"])
     extendable_carriers = params.electricity["extendable_carriers"]
@@ -1070,17 +1102,28 @@ if __name__ == "__main__":
     else:
         fuel_price = None
 
-    # add_co2_emissions() (called inside attach_conventional_generators) hard-looks-up each
-    # carrier's "-" prefix; add throwaway alias rows to avoid KeyError (overwritten below).
-    costs_for_attach = costs.copy()
-    for carrier in list(costs.index):
-        suptech = carrier.split("-")[0]
-        if suptech not in costs_for_attach.index:
-            costs_for_attach.loc[suptech] = costs_for_attach.loc[carrier]
+    # ------------------------------------------------------------------
+    # Upstream-equivalent assembly: same steps as PyPSA-Eur add_electricity,
+    # with REMIND-specific inputs/params (regional costs, adjusted power
+    # plants, per-bus load scaling) substituted; hydro is REMIND-adjusted.
+    # ------------------------------------------------------------------
+    attach_load(
+        n,
+        snakemake.input.load,
+        snakemake.input.busmap,
+        load_scaling_per_bus,
+    )
+
+    set_transmission_costs(
+        n,
+        costs,
+        params.line_length_factor,
+        params.link_length_factor,
+    )
 
     attach_conventional_generators(
         n,
-        costs_for_attach,
+        build_costs_with_suptech_aliases(costs),
         ppl,
         conventional_carriers,
         extendable_carriers,
@@ -1113,28 +1156,9 @@ if __name__ == "__main__":
             carriers,
             snakemake.input.hydro_targets,
             year,
+            country_to_region,
             **p,
         )
-
-    estimate_renewable_caps = params.electricity["estimate_renewable_capacities"]
-    if estimate_renewable_caps["enable"]:
-        if params.foresight != "overnight":
-            logger.info(
-                "Skipping renewable capacity estimation because they are added later "
-                "in rule `add_existing_baseyear` with foresight mode 'myopic'."
-            )
-        else:
-            tech_map = estimate_renewable_caps["technology_mapping"]
-            expansion_limit = estimate_renewable_caps["expansion_limit"]
-            year = estimate_renewable_caps["year"]
-
-            if estimate_renewable_caps["from_powerplantmatching"]:
-                attach_renewable_powerplants(n, tech_map, snakemake.input)
-
-            if estimate_renewable_caps["from_irenastat"]:
-                estimate_renewable_capacities(
-                    n, year, tech_map, expansion_limit, params.countries
-                )
 
     update_p_nom_max(n)
 
@@ -1146,114 +1170,70 @@ if __name__ == "__main__":
     store_carriers = [c for c in extendable_carriers["Store"] if c != "H2"]
     attach_stores(n, costs, n.buses.index, store_carriers)
 
-    # Apply REMIND-specific hydrogen storage and links BEFORE sector coupling
-    # (sector coupling needs H2 buses to attach hydrogen demand)
+    # ------------------------------------------------------------------
+    # REMIND overlay: per-node hydrogen storage/conversion (no H2 grid),
+    # battery floor, and sector-coupling loads (electrolysis / EV / heat)
+    # that upstream add_electricity never builds.
+    # ------------------------------------------------------------------
+    # H2 storage/links must precede sector coupling, which attaches demand to the H2 buses.
     if "H2" in extendable_carriers["Store"]:
-        attach_hydrogen_storage_remind(n, snakemake, costs)
+        attach_hydrogen_storage_remind(
+            n,
+            costs,
+            snakemake.input.h2_cavern,
+            snakemake.params["h2_settings"],
+            sector_coupling["electrolysis"],
+        )
 
-    # Apply battery e_min_pu constraint from REMIND configuration
-    battery_settings = snakemake.params.get("battery_settings", {})
-    if "e_min_pu" in battery_settings and "battery" in extendable_carriers["Store"]:
-        e_min_pu = battery_settings["e_min_pu"]
-        battery_mask = n.stores["carrier"] == "battery"
-        n.stores.loc[battery_mask, "e_min_pu"] = e_min_pu
-        logger.info(f"Applied REMIND battery e_min_pu constraint: {e_min_pu}")
-
-    if params.electricity.get("estimate_battery_capacities", False):
-        attach_existing_batteries(n, costs, ppl)
-
-    # Add sectors if configured
-    sector_coupling = snakemake.params["sector_coupling"]
+    apply_battery_e_min_pu(
+        n, snakemake.params.get("battery_settings", {}), extendable_carriers
+    )
 
     if sector_coupling["electrolysis"]["enable"]:
-        attach_hydrogen_demand_remind(
-            n,
-            sectoral_load,
-        )
+        attach_hydrogen_demand_remind(n, sectoral_load)
 
-    if sector_coupling["EV_pass"]["enable"]:
-        attach_ev_demand_remind(
-            n,
-            sectoral_load,
-            sector_coupling["EV_pass"],
-            snakemake.params["sector"],
-            snakemake.input.transport_demand,
-            snakemake.input.transport_data,
-            snakemake.input.avail_profile,
-            snakemake.input.dsm_profile,
-            snakemake.input.temp_air_total,
-            snakemake.input.fleet_file,
-            year,
-            kind="pass",
-        )
+    for kind in ("pass", "freight"):
+        if sector_coupling[f"EV_{kind}"]["enable"]:
+            attach_ev_demand_remind(
+                n,
+                sectoral_load,
+                sector_coupling[f"EV_{kind}"],
+                snakemake.params["sector"],
+                snakemake.input.transport_demand,
+                snakemake.input.transport_data,
+                snakemake.input.avail_profile,
+                snakemake.input.dsm_profile,
+                snakemake.input.temp_air_total,
+                snakemake.input.fleet_file,
+                year,
+                kind=kind,
+                country_to_region=country_to_region,
+            )
 
-    if sector_coupling["EV_freight"]["enable"]:
-        attach_ev_demand_remind(
-            n,
-            sectoral_load,
-            sector_coupling["EV_freight"],
-            snakemake.params["sector"],
-            snakemake.input.transport_demand,
-            snakemake.input.transport_data,
-            snakemake.input.avail_profile,
-            snakemake.input.dsm_profile,
-            snakemake.input.temp_air_total,
-            snakemake.input.fleet_file,
-            year,
-            kind="freight",
-        )
+    for kind in ("heatpump", "resistive"):
+        if sector_coupling[kind]["enable"]:
+            attach_heat_demand_remind(
+                n,
+                sectoral_load,
+                sector_coupling[kind],
+                snakemake.input.wh_share,
+                snakemake.input.hourly_heat_demand_total,
+                snakemake.input.hourly_water_heat_demand_total,
+                year,
+                kind=kind,
+                cop_profiles_fn=(
+                    snakemake.input.cop_profiles if kind == "heatpump" else None
+                ),
+            )
 
-    if sector_coupling["heatpump"]["enable"]:
-        attach_heat_demand_remind(
-            n,
-            sectoral_load,
-            sector_coupling["heatpump"],
-            snakemake.input.wh_share,
-            snakemake.input.hourly_heat_demand_total,
-            snakemake.input.hourly_water_heat_demand_total,
-            year,
-            kind="heatpump",
-            cop_profiles_fn=snakemake.input.cop_profiles,
-        )
-
-    if sector_coupling["resistive"]["enable"]:
-        attach_heat_demand_remind(
-            n,
-            sectoral_load,
-            sector_coupling["resistive"],
-            snakemake.input.wh_share,
-            snakemake.input.hourly_heat_demand_total,
-            snakemake.input.hourly_water_heat_demand_total,
-            year,
-            kind="resistive",
-        )
-
+    # ------------------------------------------------------------------
+    # Finalisation: carrier metadata, name normalisation, per-region costs.
+    # ------------------------------------------------------------------
     sanitize_carriers(n, snakemake.config)
     if "location" in n.buses:
         sanitize_locations(n)
 
-    # Lowercase the carrier/class suffix of generator names (keep bus prefix as-is)
-    # and sort alphabetically. Example: "DE0 0 CCGT" → "DE0 0 ccgt".
-    buses = set(n.buses.index)
-    rename_map = {}
-    for name in n.generators.index:
-        for bus in buses:
-            if name.startswith(bus + " "):
-                rename_map[name] = bus + " " + name[len(bus) + 1:].lower()
-                break
-        else:
-            rename_map[name] = name
-    n.generators = n.generators.rename(index=rename_map).sort_index()
-    for attr, df in n.generators_t.items():
-        n.generators_t[attr] = df.rename(columns=rename_map).reindex(
-            sorted(df.rename(columns=rename_map).columns), axis=1
-        )
-
-    # Overwrite with full-name CO2 intensity (the suptech-prefix pass above conflates e.g.
-    # biomass-chp and biomass-igcc-ccs, whose BECCS makes it carbon-negative).
-    for carrier in costs.index:
-        if carrier in n.carriers.index and not pd.isna(costs.at[carrier, "CO2 intensity"]):
-            n.carriers.at[carrier, "co2_emissions"] = costs.at[carrier, "CO2 intensity"]
+    overwrite_carrier_co2_intensities(n, costs)
 
     # Override component costs with per-region REMIND values and add regional CO₂ costs.
     # Must run after carrier CO₂ intensities are set above (needed for CO₂ cost calc).
