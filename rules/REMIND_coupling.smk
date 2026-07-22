@@ -268,8 +268,9 @@ def _get_fleet_input(wildcards):
     else:
         return []
 
-# This is the main rule that brings all REMIND inputs together and creates the electricity network for the given scenario, iteration and year.
-# TODO: Revert to default add_electricity and use this rule to overwrite afterwards?
+# This is the main rule that brings all REMIND inputs together and creates the electricity network including
+# sectoral electricity demand profiles.
+# Kept as a single rule by design. See the script's module docstring for the two-layer structure.
 rule add_electricity_sector_REMIND:
     message:
         "Adding electricity and sector coupling to REMIND-coupled network"

@@ -4,14 +4,14 @@ SPDX-FileCopyrightText: Potsdam Institute for Climate Impact Research (PIK)
 SPDX-License-Identifier: CC-BY-4.0
 -->
 
+# PyPSA-Eur-IAM: Coupling PyPSA-Eur with Integrated Assessment Models
+
 [![Upstream](https://img.shields.io/badge/upstream-pypsa--eur_v2026.02.0-blue)](https://github.com/PyPSA/pypsa-eur/releases/tag/v2026.02.0)
 [![Snakemake](https://img.shields.io/badge/snakemake-≥9-brightgreen.svg?style=flat)](https://snakemake.readthedocs.io)
 
-
-# PyPSA-Eur-IAM: Coupling PyPSA-Eur with Integrated Assessment Models
-
-> **This is a fork of [PyPSA-Eur](https://github.com/PyPSA/pypsa-eur) maintained by the 
-> [Potsdam Institute for Climate Impact Research (PIK)](https://www.pik-potsdam.de).**
+> [!IMPORTANT]
+> This is a fork of [PyPSA-Eur](https://github.com/PyPSA/pypsa-eur) maintained by the 
+> [Potsdam Institute for Climate Impact Research (PIK)](https://www.pik-potsdam.de).
 > It extends PyPSA-Eur with modifications required to couple it with Integrated Assessment
 > Models (IAMs) such as [REMIND](https://github.com/remindmodel/remind).
 
@@ -35,7 +35,7 @@ The diagram below is the Snakemake job graph (`--dag`) for solving one REMIND-co
 
 ## Syncing with upstream
 
-This fork is periodically synced with upstream PyPSA-Eur releases, currently `v2026.02.0`. Also see the tag `upstream-v2026.02.0`.
+This fork is periodically synced with upstream PyPSA-Eur releases, currently `v2026.02.0`. Also see tag [`v2026.02.0-iam-sync`](https://github.com/pik-piam/pypsa-eur-iam/releases/tag/v2026.02.0-iam-sync).
 
 ## Getting started
 
