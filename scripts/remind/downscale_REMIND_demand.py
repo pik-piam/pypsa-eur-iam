@@ -14,8 +14,9 @@ import logging
 
 import pandas as pd
 from _helpers import configure_logging, mock_snakemake
+from iampypsa import Coupler
 from iampypsa.couplers.remind import read_region_map as get_region_mapping
-from iampypsa.downscale import build_demand_proxy_from_dd, disaggregate_demand_to_country
+from iampypsa.downscale import build_demand_proxy_from_dd
 from iampypsa.io import read_degree_days
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ if __name__ == "__main__":
     if "snakemake" not in globals():
         snakemake = mock_snakemake(
             "downscale_REMIND_demand",
+            snakefile_choices=["Snakefile_REMIND"],
             scen_REMIND="TEST_multiregion",
             iter_REMIND="1",
             configfiles="config/config.remind_multiregion.yaml",
@@ -83,13 +85,17 @@ if __name__ == "__main__":
 
     loads = sectoral_load[sectoral_load["year"].isin(years)]
     loads = fold_unconfigured_sectors_into_ac(loads, snakemake.params.sector_weights)
-    result = disaggregate_demand_to_country(
-        loads,
-        region_to_countries,
-        proxies,
-        snakemake.params.sector_weights,
-        configured_countries,
+    coupler = Coupler(
+        loader=None,
+        symbols={},
+        region_map=region_to_countries,
+        config={
+            "sector_weights": snakemake.params.sector_weights,
+            "countries": configured_countries,
+        },
+        reference_data=proxies,
     )
+    result = coupler.downscale_country_demand(regional=loads)
 
     if missing := sorted(configured_countries - set(result["region"].unique())):
         country_to_region = {

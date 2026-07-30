@@ -34,6 +34,7 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "build_hourly_water_heat_demand_REMIND",
+            snakefile_choices=["Snakefile_REMIND"],
             clusters=4,
         )
     configure_logging(snakemake)

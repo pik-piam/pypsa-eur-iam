@@ -135,6 +135,7 @@ if __name__ == "__main__":
     if "snakemake" not in globals():
         snakemake = mock_snakemake(
             "adjust_powerplants_REMIND",
+            snakefile_choices=["Snakefile_REMIND"],
             scenario="TEST",
             iteration="1",
             year="2030",

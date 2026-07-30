@@ -4,7 +4,6 @@
 
 import contextlib
 import copy
-import functools
 import logging
 import os
 import re
@@ -25,20 +24,11 @@ import yaml
 from snakemake.utils import update_config
 from tqdm import tqdm
 
-import subprocess
-import sys
-import time
-import multiprocessing
-import gurobipy
-
 logger = logging.getLogger(__name__)
 
 REGION_COLS = ["geometry", "name", "x", "y", "country"]
 
 PYPSA_V1 = bool(re.match(r"^1\.\d", pypsa.__version__))
-
-DEFAULT_TUNNEL_PORT = 1080
-DEFAULT_LOGIN_NODE = "01"
 
 
 def get_scenarios(run):
@@ -511,6 +501,7 @@ def mock_snakemake(
     root_dir=None,
     configfiles=None,
     submodule_dir="workflow/submodules/pypsa-eur",
+    snakefile_choices=None,
     **wildcards,
 ):
     """
@@ -531,6 +522,9 @@ def mock_snakemake(
     submodule_dir: str, Path
         in case PyPSA-Eur is used as a submodule, submodule_dir is
         the path of pypsa-eur relative to the project directory.
+    snakefile_choices: list, optional
+        candidate Snakefile names to search for in root_dir, tried in order.
+        Defaults to snakemake's own SNAKEFILE_CHOICES.
     **wildcards:
         keyword arguments fixing the wildcards. Only necessary if wildcards are
         needed.
@@ -574,7 +568,7 @@ def mock_snakemake(
         workdir = Path.cwd()
 
     try:
-        for p in ["Snakefile_REMIND"]:
+        for p in snakefile_choices or SNAKEFILE_CHOICES:
             p = root_dir / p
             if os.path.exists(p):
                 snakefile = p
@@ -879,51 +873,6 @@ def update_config_from_wildcards(config, w, inplace=True):
         return config
 
 
-@functools.lru_cache
-def get_technology_mapping(
-    fn: str | Path,
-    group_technologies: bool = False,
-) -> pd.DataFrame:
-    """
-    Return a 1:1 mapping between PyPSA-Eur carriers and REMIND technologies with a capacity target.
-
-    Filters technologies (from technology_mapping_REMIND.yaml) to those whose ``iam_name``
-    is in ``iampypsa.io.build_capacity_reporting_technologies()`` — capacity and cost sourcing
-    don't always coincide (e.g. csp/geothermal report capacity but not investment cost).
-
-    Parameters
-    ----------
-    fn : str or Path
-        Path to the technology mapping YAML (model overlay).
-    group_technologies : bool, optional
-        Deprecated; kept for backward compatibility. When True, adds a "technology_group"
-        column equal to "REMIND-EU".
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns "PyPSA-Eur" and "REMIND-EU" (and "technology_group" if group_technologies
-        is True).
-    """
-    from iampypsa.io import build_capacity_reporting_technologies, load_technology_parameters
-    from iampypsa.io.technology_mapping import iam_name
-
-    technologies = load_technology_parameters(fn)["technologies"]
-    reports_capacity = build_capacity_reporting_technologies()
-    rows = [
-        {"PyPSA-Eur": tech, "REMIND-EU": iam_name(tech, spec)}
-        for tech, spec in technologies.items()
-        if iam_name(tech, spec) in reports_capacity
-    ]
-
-    mapping = pd.DataFrame(rows, columns=["PyPSA-Eur", "REMIND-EU"]).drop_duplicates().reset_index(drop=True)
-
-    if group_technologies:
-        mapping["technology_group"] = mapping["REMIND-EU"]
-
-    return mapping
-
-
 def get_snapshots(
     snapshots: dict, drop_leap_day: bool = False, freq: str = "h", **kwargs
 ) -> pd.DatetimeIndex:
@@ -1127,128 +1076,3 @@ def load_costs(cost_file: str) -> pd.DataFrame:
     """
 
     return pd.read_csv(cost_file, index_col=0)
-
-
-def is_tunnel_alive(tunnel_config: dict):
-    """Check if the SSH tunnel is running by checking if the port is in use."""
-    port = tunnel_config.get("tunnel_port", DEFAULT_TUNNEL_PORT)
-    result = subprocess.run(
-        f"netstat -tlnp 2>/dev/null | grep :{port}", 
-        shell=True, 
-        stdout=subprocess.PIPE
-    )
-    return result.returncode == 0
-
-def setup_gurobi_tunnel_and_env(
-    tunnel_config: dict, logger: logging.Logger = None, attempts=4
-) -> subprocess.Popen:
-    """A utility function to set up the Gurobi environment variables and establish an
-    SSH tunnel on HPCs. Otherwise the license check will fail if the compute nodes do
-     not have internet access or a token server isn't set up
-
-    Args:
-        config (dict): the snakemake pypsa-china configuration
-        logger (logging.Logger, optional): Logger. Defaults to None.
-        attempts (int, optional): ssh connection attemps. Defaults to 4.
-    """
-    if not tunnel_config.get("use_tunnel", False):
-        return
-    logger.info("setting up tunnel")
-    user = os.getenv("USER")  # User is pulled from the environment
-    port = tunnel_config.get("tunnel_port", DEFAULT_TUNNEL_PORT)
-    login_node = tunnel_config.get("login_node", DEFAULT_LOGIN_NODE)
-    timeout = tunnel_config.get("timeout_s", 60)
-
-    # bash commands for tunnel: reduce pipe err severity (too high from snakemake)
-    pipe_err = "set -o pipefail; "
-    ssh_command = f"ssh -vvv -fN -D {port} -o ConnectTimeout={timeout} {user}@login{login_node}"
-    logger.info(f"Attempting ssh tunnel to login node {login_node}")
-    # Run SSH in the background to establish the tunnel
-    socks_proc = subprocess.Popen(
-        pipe_err + ssh_command,
-        shell=True,
-        stderr=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-    )
-
-    try:
-        stdout, stderr = socks_proc.communicate(timeout=timeout + 2)
-        err = stderr.decode()
-        logger.info(f"ssh err returns {str(err)}")
-        logger.info(f"ssh stdout returns {str(stdout)}")
-        if err.find("Permission") != -1 or err.find("Could not resolve hostname") != -1:
-            socks_proc.kill()
-        else:
-            logger.info("Gurobi Environment variables & tunnel set up successfully at attempt {i}.")
-    except subprocess.TimeoutExpired:
-        logger.error("SSH tunnel communication timed out.")
-
-    os.environ["https_proxy"] = f"socks5://127.0.0.1:{port}"
-    os.environ["SSL_CERT_FILE"] = "/p/projects/rd3mod/ssl/ca-bundle.pem_2022-02-08"
-    os.environ["GRB_CAFILE"] = "/p/projects/rd3mod/ssl/ca-bundle.pem_2022-02-08"
-
-    # Set up Gurobi environment variables
-    os.environ["GUROBI_HOME"] = "/p/projects/rd3mod/gurobi1103/linux64"
-    os.environ["PATH"] += f":{os.environ['GUROBI_HOME']}/bin"
-    if "LD_LIBRARY_PATH" in os.environ:
-        os.environ["LD_LIBRARY_PATH"] += f":{os.environ['GUROBI_HOME']}/lib"
-    os.environ["GRB_LICENSE_FILE"] = "/p/projects/rd3mod/gurobi_rc/gurobi.lic"
-    os.environ["GRB_CURLVERBOSE"] = "1"
-    os.environ["GRB_SERVER_TIMEOUT"] = "10"
-
-    return socks_proc
-
-def _check_gurobi_license_subprocess() -> bool:
-    """
-    Subprocess function to check Gurobi license availability.
-    This function will start the Gurobi environment to verify if a license is available.
-
-    Returns:
-        bool: True if the license check succeeded, False otherwise.
-    """
-    try:
-        env = gurobipy.Env(empty=True)
-        env.start()  # Start the Gurobi environment (this will attempt to acquire the license)
-        logger.info("Gurobi license is available.")
-        env.dispose()  # Dispose of the environment after use
-        return True
-    except gurobipy.GurobiError as e:
-        logger.error(f"Error checking Gurobi license: {e}")
-        return False
-
-
-def check_gurobi_license(attempts=1, timeout=10) -> bool:
-    """
-    Checks the availability of the Gurobi license in a subprocess with timeout.
-
-    Args:
-        attempts (int): Number of attempts.
-        timeout (int): Time to wait before retrying (in seconds).
-
-    Returns:
-        bool: True if the license is available, False if the check times out.
-    """
-    logger.info("Checking Gurobi license availability...")
-
-    for _ in range(attempts):
-        # Create a multiprocessing Process to check license
-        process = multiprocessing.Process(target=_check_gurobi_license_subprocess)
-        process.start()
-
-        process.join(timeout=timeout)  # Wait for the process to finish or timeout
-
-        if process.is_alive():
-            # If the process is still alive after the timeout, terminate it
-            process.terminate()
-            process.join()  # Ensure it is properly joined to clean up
-            logger.warning("License check timeout. Retrying...")
-        else:
-            # If the process completed, check the result
-            if process.exitcode == 0:
-                # License was available
-                return True
-            else:
-                # License was not available
-                logger.warning("License not available during subprocess check. Retrying...")
-
-    return False

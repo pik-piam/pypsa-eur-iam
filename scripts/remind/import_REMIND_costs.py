@@ -4,8 +4,9 @@ Build REMIND-adjusted technology costs for PyPSA-Eur.
 Reads investment costs, fixed/variable O&M, lifetime, efficiency, CO2 intensity, and fuel
 costs from the REMIND output file (GDX or IAMC .mif), maps them to PyPSA-Eur carrier names
 via ``config/technology_mapping_REMIND.yaml``, and merges the result as overrides on top of the
-PyPSA-Eur baseline cost CSV. Investment costs for electrolysis and battery inverter are
-converted from output-capacity to input-capacity basis. Per-region discount rates from
+PyPSA-Eur baseline cost CSV. Electrolysis investment is converted from output-capacity to
+input-capacity basis (see ``LINK_TECHS`` below for why only electrolysis needs this). Per-region
+discount rates from
 REMIND are used, and PyPSA-Eur's ``prepare_costs`` function computes annualised capital
 costs and marginal costs — called once per mapped REMIND region.
 
@@ -23,10 +24,8 @@ import pandas as pd
 import pypsa
 import scripts.process_cost_data as process_cost_data
 from _helpers import configure_logging
-from iampypsa import RemindGdxCoupler, RemindIamcCoupler
-from iampypsa.couplers.remind import read_region_map as get_region_mapping
-from iampypsa.io import RemindLoader, load_technology_parameters
-from iampypsa.io.remind_symbols import load_symbol_specs
+from scripts.remind._remind_helpers import build_remind_coupler
+from iampypsa.io import load_technology_parameters
 from iampypsa.transforms.costs import (
     add_discount_rate,
     build_pypsa_techdata,
@@ -39,8 +38,10 @@ from scripts.process_cost_data import prepare_costs
 
 logger = logging.getLogger(__name__)
 
-# Which coupler handles each REMIND output backend (selected from loader.backend below).
-REMIND_COUPLERS = {"gdx": RemindGdxCoupler, "iamc": RemindIamcCoupler}
+# Only electrolysis needs output->input capacity-basis conversion here: add_electricity.py uses
+# its capital_cost uncorrected. Fuel cell is excluded because add_electricity.py already applies
+# its own efficiency correction internally; converting it here too would double-correct.
+LINK_TECHS = ["electrolysis"]
 
 
 if __name__ == "__main__":
@@ -49,6 +50,7 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "import_REMIND_costs",
+            snakefile_choices=["Snakefile_REMIND"],
             scen_REMIND="PkBudg1000_EU",
             iter_REMIND="1",
             year_REMIND="2050",
@@ -60,25 +62,16 @@ if __name__ == "__main__":
     logger.info("Building REMIND-adjusted costs for year %s", year)
 
     countries = set(snakemake.config["countries"])
-    full_mapping = get_region_mapping(source="country", target="model_region")
-    mapped_regions = {
-        r for c, rs in full_mapping.items() if c in countries for r in rs if r
-    }
-
     technologies = load_technology_parameters(snakemake.input["technology_mapping"])["technologies"]
     mapped_technologies = set(technologies)
 
-    loader = RemindLoader(snakemake.input["remind_data"])
-    symbols = load_symbol_specs(backend=loader.backend)
-    coupler_cls = REMIND_COUPLERS[loader.backend]
-    coupler = coupler_cls(
-        loader, symbols, region_map={}, config={},
-        model_regions=sorted(mapped_regions),
-    )
+    coupler = build_remind_coupler(snakemake.input["remind_data"], countries)
     remind_long = coupler.extract_cost_parameters(int(year))
 
     # battery-inverter round-trip efficiency: REMIND reports the one-way inverter
-    # efficiency; PyPSA-Eur's two-link battery needs it squared.
+    # efficiency; PyPSA-Eur's two-link battery needs it squared. Dormant under the current
+    # technology_mapping_REMIND.yaml (battery inverter is source: PyPSA, so build_iam_techdata
+    # never pulls this row in)
     is_battery_inverter_eff = (remind_long["parameter"] == "efficiency") & (
         remind_long["technology"] == "battery-inverter"
     )
@@ -101,7 +94,8 @@ if __name__ == "__main__":
         ignore_index=True,
     )
 
-    discount_rates = coupler.discount_rates(int(year))
+    discount_rates = coupler.build_discount_rates(int(year))
+    discount_rate_symbol = coupler.symbols["discount_rate"]["symbol"]
     logger.info(
         "Regional REMIND discount rates for year %s: %s",
         year,
@@ -119,7 +113,7 @@ if __name__ == "__main__":
     all_raw = []
     all_processed = []
 
-    for region in sorted(mapped_regions):
+    for region in coupler.model_regions:
         region_overrides = regional_mapped_overrides[
             regional_mapped_overrides["region"] == region
         ].drop(columns="region")
@@ -128,9 +122,9 @@ if __name__ == "__main__":
             [region_overrides, non_regional_overrides], ignore_index=True
         )
         combined = add_discount_rate(
-            combined, discount_rates[region], source="REMIND-EU", reference="p_r"
+            combined, discount_rates[region], source="REMIND", reference=discount_rate_symbol
         )
-        combined = convert_investment_to_input_capacity_basis(combined)
+        combined = convert_investment_to_input_capacity_basis(combined, LINK_TECHS)
 
         merged_raw = apply_overrides(baseline_raw, combined)
 

@@ -1013,6 +1013,7 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "add_electricity_sector_REMIND",
+            snakefile_choices=["Snakefile_REMIND"],
             scen_REMIND="PkBudg1000_DE_TEST",
             iter_REMIND="1",
             year_REMIND="2050",

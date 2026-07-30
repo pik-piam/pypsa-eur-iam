@@ -15,9 +15,10 @@ from _helpers import (
     configure_logging,
     mock_snakemake,
 )
+from iampypsa import Coupler
 from iampypsa.couplers.remind import read_region_map as get_region_mapping
 from iampypsa.io import RemindLoader
-from iampypsa.io.remind_symbols import load_frame, load_spec, load_symbol_specs
+from iampypsa.io.remind_symbols import load_frame, load_symbol_specs
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ if __name__ == "__main__":
     if "snakemake" not in globals():
         snakemake = mock_snakemake(
             "import_REMIND_hydro",
+            snakefile_choices=["Snakefile_REMIND"],
             scen_REMIND="TEST_multiregion",
             iter_REMIND="1",
             configfiles="config/config.remind_multiregion.yaml",
@@ -39,10 +41,11 @@ if __name__ == "__main__":
 
     loader = RemindLoader(snakemake.input["remind_data"])
     symbols = load_symbol_specs(backend=loader.backend)
+    coupler = Coupler(loader, symbols, region_map={}, config={})
 
     # Hydro capacity: the `capacity` symbol (vm_cap / Cap|Electricity|Hydro), filtered to hydro.
     # The defensive groupby below sums out any extra dims (e.g. GDX vm_cap's `rlf` grades).
-    capacity = load_spec(loader, symbols["capacity"])
+    capacity = coupler.prepare_capacities()
     hydro_capacity = capacity[capacity["technology"] == "hydro"]
     hydro_generation = load_frame(
         loader, symbols["hydro_generation"]

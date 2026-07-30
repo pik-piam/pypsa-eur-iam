@@ -11,7 +11,7 @@ import pypsa
 import xarray as xr
 from iampypsa.couplers.remind import read_region_map as get_region_mapping
 
-from scripts._helpers import get_technology_mapping
+from scripts.remind._remind_helpers import build_capacity_technology_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ def _build_country_to_region_map() -> pd.Series:
 def _build_carrier_to_technology_group_map(fp_technology_mapping: str) -> pd.Series:
     # With 1:1 mapping, each PyPSA carrier maps to itself as the target group.
     # Build from a dict to guarantee unique keys.
-    mapping = get_technology_mapping(fp_technology_mapping)
+    mapping = build_capacity_technology_mapping(fp_technology_mapping)
     carrier_to_group = {c: c for c in mapping["PyPSA-Eur"]}
 
     # ror and hydro are summed together against REMIND's single "hydro" target
