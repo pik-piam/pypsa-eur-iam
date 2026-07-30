@@ -562,6 +562,7 @@ if __name__ == "__main__":
 
         snakemake = mock_snakemake(
             "export_to_REMIND",
+            snakefile_choices=["Snakefile_REMIND"],
             configfiles="resources/TEST/i1/config.remind_scenario.yaml",
             iteration="1",
             scenario="TEST",

@@ -258,8 +258,12 @@ solving:
   gurobi_hpc_tunnel:
     use_tunnel: false
     tunnel_port: 26998
-    login_node: '02'
+    login_host: login02
     timeout_s: 15
+    ssl_cert_file: /p/projects/rd3mod/ssl/ca-bundle.pem_2022-02-08
+    grb_cafile: /p/projects/rd3mod/ssl/ca-bundle.pem_2022-02-08
+    gurobi_home: /p/projects/rd3mod/gurobi1103/linux64
+    grb_license_file: /p/projects/rd3mod/gurobi_rc/gurobi.lic
   solver_options:
     gurobi-default:
       threads: 8

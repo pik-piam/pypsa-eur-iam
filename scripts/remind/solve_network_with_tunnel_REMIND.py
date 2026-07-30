@@ -17,9 +17,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from _helpers import (
+from _helpers import configure_logging
+from scripts.remind._remind_helpers import (
     check_gurobi_license,
-    configure_logging,
     is_tunnel_alive,
     setup_gurobi_tunnel_and_env,
 )
